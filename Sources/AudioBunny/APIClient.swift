@@ -7,12 +7,36 @@ enum APIClient {
         UserDefaults.standard.string(forKey: "apiBaseURL") ?? "http://localhost:3000/api/v1"
     }
 
+    private static let tokenKey = "audiobunny.jwt"
+    private static var didMigrateToken = false
+
     private static var token: String? {
-        get { UserDefaults.standard.string(forKey: "audiobunny.jwt") }
-        set { UserDefaults.standard.setValue(newValue, forKey: "audiobunny.jwt") }
+        get {
+            migrateTokenToKeychainIfNeeded()
+            return KeychainStore.get(key: tokenKey)
+        }
+        set {
+            if let newValue {
+                KeychainStore.set(newValue, key: tokenKey)
+            } else {
+                KeychainStore.remove(key: tokenKey)
+            }
+        }
+    }
+
+    /// Older builds stored the JWT in UserDefaults; move it to the Keychain once.
+    private static func migrateTokenToKeychainIfNeeded() {
+        guard !didMigrateToken else { return }
+        didMigrateToken = true
+        guard KeychainStore.get(key: tokenKey) == nil,
+              let legacyToken = UserDefaults.standard.string(forKey: tokenKey) else { return }
+        KeychainStore.set(legacyToken, key: tokenKey)
+        UserDefaults.standard.removeObject(forKey: tokenKey)
     }
 
     static func clearToken() { token = nil }
+
+    static var isSignedIn: Bool { token != nil }
 
     // MARK: - Auth
 
@@ -32,6 +56,58 @@ enum APIClient {
 
     static func me() async throws -> APIUser {
         try await get("auth/me")
+    }
+
+    static func signInWithApple(idToken: String, email: String? = nil) async throws -> AuthResponse {
+        var body = ["id_token": idToken]
+        if let email { body["email"] = email }
+        let response: AuthResponse = try await post("auth/apple", body: body)
+        token = response.token
+        return response
+    }
+
+    static func signInWithGoogle(idToken: String) async throws -> AuthResponse {
+        let response: AuthResponse = try await post("auth/google", body: ["id_token": idToken])
+        token = response.token
+        return response
+    }
+
+    // MARK: - Machines / sync
+
+    static func registerMachine(name: String) async throws -> APIMachine {
+        try await post("machines/register", body: ["client_uuid": MachineIdentity.id, "name": name])
+    }
+
+    static func syncPlugins(machineID: Int, plugins: [AudioPlugin]) async throws {
+        var req = try makeRequest("machines/\(machineID)/sync_plugins", method: "POST")
+        let body: [String: Any] = [
+            "plugins": plugins.map {
+                [
+                    "name": $0.name,
+                    "manufacturer": $0.manufacturer,
+                    "plugin_type": $0.type.rawValue,
+                    "version": $0.version ?? "",
+                ]
+            }
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let _: OkResponse = try await decode(perform: req)
+    }
+
+    static func syncProjects(_ folders: [ProjectFolder]) async throws {
+        var req = try makeRequest("sync/projects", method: "POST")
+        let payload = folders.flatMap { $0.projects }.map { project -> [String: Any] in
+            let parent = project.url.deletingLastPathComponent().lastPathComponent
+            return [
+                "identifier": "\(parent)/\(project.name)",
+                "name": project.name,
+                "plugins": project.plugins.map {
+                    ["name": $0.name, "manufacturer": $0.manufacturer ?? "", "plugin_type": $0.type?.rawValue ?? ""]
+                },
+            ]
+        }
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["projects": payload])
+        let _: OkResponse = try await decode(perform: req)
     }
 
     // MARK: - Plugins

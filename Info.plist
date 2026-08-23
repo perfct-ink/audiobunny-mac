@@ -24,5 +24,24 @@
     <string>© 2026 Example Company. All rights reserved.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.example.AudioBunny.oauth</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>audiobunny</string>
+            </array>
+        </dict>
+    </array>
+    <!-- Google OAuth "iOS"-type client registered to accept the
+         audiobunny://oauth-callback/google redirect above — see GoogleOAuth.swift.
+         Fill these in from Google Cloud Console; sign-in with Google throws
+         GoogleOAuthError.notConfigured until they're set. -->
+    <key>GoogleOAuthClientID</key>
+    <string></string>
+    <key>GoogleOAuthClientSecret</key>
+    <string></string>
 </dict>
 </plist>

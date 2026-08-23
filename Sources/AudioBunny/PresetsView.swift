@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AuthenticationServices
 
 // MARK: - Presets View
 
@@ -491,6 +492,40 @@ struct AccountSheet: View {
             .buttonStyle(.plain)
             .font(.caption)
             .foregroundStyle(Color.accentColor)
+
+            HStack {
+                Rectangle().fill(Color.secondary.opacity(0.3)).frame(height: 1)
+                Text("or").font(.caption).foregroundStyle(.secondary)
+                Rectangle().fill(Color.secondary.opacity(0.3)).frame(height: 1)
+            }
+
+            VStack(spacing: 8) {
+                SignInWithAppleButton(.signIn, onRequest: { request in
+                    request.requestedScopes = [.email, .fullName]
+                }, onCompletion: { result in
+                    guard case .success(let authorization) = result,
+                          let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
+                          let tokenData = credential.identityToken,
+                          let idToken = String(data: tokenData, encoding: .utf8)
+                    else { return }
+                    Task {
+                        await presetManager.loginWithApple(idToken: idToken, email: credential.email)
+                        if presetManager.authError == nil { isPresented = false }
+                    }
+                })
+                .signInWithAppleButtonStyle(.black)
+                .frame(height: 32)
+
+                Button {
+                    Task {
+                        await presetManager.signInWithGoogle()
+                        if presetManager.authError == nil { isPresented = false }
+                    }
+                } label: {
+                    Text("Sign in with Google").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
         }
         .padding(30)
         .frame(width: 380)

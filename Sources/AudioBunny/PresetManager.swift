@@ -47,7 +47,7 @@ final class PresetManager: ObservableObject {
     // MARK: Session
 
     private func restoreSession() {
-        guard UserDefaults.standard.string(forKey: "audiobunny.jwt") != nil else { return }
+        guard APIClient.isSignedIn else { return }
         Task {
             isLoadingAuth = true
             do {
@@ -84,6 +84,35 @@ final class PresetManager: ObservableObject {
         authError = nil
         do {
             let response = try await APIClient.login(login: login, password: password)
+            currentUser = response.user
+            await fetchPresets()
+            startQueuePolling()
+        } catch {
+            authError = error.localizedDescription
+        }
+        isLoadingAuth = false
+    }
+
+    func loginWithApple(idToken: String, email: String?) async {
+        isLoadingAuth = true
+        authError = nil
+        do {
+            let response = try await APIClient.signInWithApple(idToken: idToken, email: email)
+            currentUser = response.user
+            await fetchPresets()
+            startQueuePolling()
+        } catch {
+            authError = error.localizedDescription
+        }
+        isLoadingAuth = false
+    }
+
+    func signInWithGoogle() async {
+        isLoadingAuth = true
+        authError = nil
+        do {
+            let idToken = try await GoogleOAuth.signIn()
+            let response = try await APIClient.signInWithGoogle(idToken: idToken)
             currentUser = response.user
             await fetchPresets()
             startQueuePolling()

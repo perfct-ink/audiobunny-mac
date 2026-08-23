@@ -34,6 +34,8 @@ struct ContentView: View {
     @EnvironmentObject var manager: PluginManager
     @EnvironmentObject var catalogManager: CatalogManager
     @EnvironmentObject var presetManager: PresetManager
+    @EnvironmentObject var liveProjectManager: LiveProjectManager
+    @EnvironmentObject var machineSyncManager: MachineSyncManager
     @State private var selectedPlugin: AudioPlugin? = nil
     @State private var showAccountSheet = false
     @AppStorage("audiobunny.activeTab") private var activeTab: AppTab = .browse
@@ -60,6 +62,11 @@ struct ContentView: View {
         }
         .removeSidebarToggle()
         .toolbar {
+            if presetManager.currentUser != nil {
+                ToolbarItem(placement: .primaryAction) {
+                    syncButton
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 accountButton
             }
@@ -68,6 +75,25 @@ struct ContentView: View {
             AccountSheet(isPresented: $showAccountSheet)
                 .environmentObject(presetManager)
         }
+        .onChange(of: presetManager.currentUser) { newValue in
+            guard newValue != nil else { return }
+            Task { await machineSyncManager.syncNow(pluginManager: manager, liveProjectManager: liveProjectManager) }
+        }
+    }
+
+    @ViewBuilder
+    private var syncButton: some View {
+        Button {
+            Task { await machineSyncManager.syncNow(pluginManager: manager, liveProjectManager: liveProjectManager) }
+        } label: {
+            if machineSyncManager.isSyncing {
+                ProgressView().scaleEffect(0.7)
+            } else {
+                Label("Sync Now", systemImage: "arrow.triangle.2.circlepath")
+            }
+        }
+        .disabled(machineSyncManager.isSyncing)
+        .help(machineSyncManager.lastSyncError ?? "Sync installed plugins and projects to your account")
     }
 
     @ViewBuilder

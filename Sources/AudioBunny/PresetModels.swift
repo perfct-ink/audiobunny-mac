@@ -19,6 +19,19 @@ struct APIUser: Decodable, Equatable {
     }
 }
 
+// MARK: - Machine
+
+struct APIMachine: Decodable, Identifiable {
+    let id: Int
+    let name: String
+    let pluginCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case pluginCount = "plugin_count"
+    }
+}
+
 // MARK: - Plugin
 
 struct APIPlugin: Decodable, Identifiable {
