@@ -35,7 +35,7 @@ struct ContentView: View {
     @EnvironmentObject var catalogManager: CatalogManager
     @EnvironmentObject var presetManager: PresetManager
     @EnvironmentObject var liveProjectManager: LiveProjectManager
-    @EnvironmentObject var machineSyncManager: MachineSyncManager
+    @EnvironmentObject var computerSyncManager: ComputerSyncManager
     @State private var selectedPlugin: AudioPlugin? = nil
     @State private var showAccountSheet = false
     @AppStorage("audiobunny.activeTab") private var activeTab: AppTab = .browse
@@ -77,23 +77,23 @@ struct ContentView: View {
         }
         .onChange(of: presetManager.currentUser) { newValue in
             guard newValue != nil else { return }
-            Task { await machineSyncManager.syncNow(pluginManager: manager, liveProjectManager: liveProjectManager) }
+            Task { await computerSyncManager.syncNow(pluginManager: manager, liveProjectManager: liveProjectManager) }
         }
     }
 
     @ViewBuilder
     private var syncButton: some View {
         Button {
-            Task { await machineSyncManager.syncNow(pluginManager: manager, liveProjectManager: liveProjectManager) }
+            Task { await computerSyncManager.syncNow(pluginManager: manager, liveProjectManager: liveProjectManager) }
         } label: {
-            if machineSyncManager.isSyncing {
+            if computerSyncManager.isSyncing {
                 ProgressView().scaleEffect(0.7)
             } else {
                 Label("Sync Now", systemImage: "arrow.triangle.2.circlepath")
             }
         }
-        .disabled(machineSyncManager.isSyncing)
-        .help(machineSyncManager.lastSyncError ?? "Sync installed plugins and projects to your account")
+        .disabled(computerSyncManager.isSyncing)
+        .help(computerSyncManager.lastSyncError ?? "Sync installed plugins and projects to your account")
     }
 
     @ViewBuilder

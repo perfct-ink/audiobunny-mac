@@ -72,14 +72,14 @@ enum APIClient {
         return response
     }
 
-    // MARK: - Machines / sync
+    // MARK: - Computers / sync
 
-    static func registerMachine(name: String) async throws -> APIMachine {
-        try await post("machines/register", body: ["client_uuid": MachineIdentity.id, "name": name])
+    static func registerComputer(name: String) async throws -> APIComputer {
+        try await post("computers/register", body: ["client_uuid": ComputerIdentity.id, "name": name])
     }
 
-    static func syncPlugins(machineID: Int, plugins: [AudioPlugin]) async throws {
-        var req = try makeRequest("machines/\(machineID)/sync_plugins", method: "POST")
+    static func syncPlugins(computerID: Int, plugins: [AudioPlugin]) async throws {
+        var req = try makeRequest("computers/\(computerID)/sync_plugins", method: "POST")
         let body: [String: Any] = [
             "plugins": plugins.map {
                 [

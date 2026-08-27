@@ -4,8 +4,8 @@ import Foundation
 // — that's shared by every user account and every app running on this same
 // physical Mac, too coarse for "this AudioBunny install." A Keychain-persisted
 // random UUID maps 1:1 to this install and survives an app reinstall.
-enum MachineIdentity {
-    private static let key = "audiobunny.machineId"
+enum ComputerIdentity {
+    private static let key = "audiobunny.computerId"
 
     static var id: String {
         if let existing = KeychainStore.get(key: key) { return existing }
@@ -15,6 +15,6 @@ enum MachineIdentity {
     }
 
     static var name: String {
-        Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        ProcessInfo.processInfo.hostName
     }
 }

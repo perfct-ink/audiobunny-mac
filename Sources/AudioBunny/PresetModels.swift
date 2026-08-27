@@ -19,9 +19,9 @@ struct APIUser: Decodable, Equatable {
     }
 }
 
-// MARK: - Machine
+// MARK: - Computer
 
-struct APIMachine: Decodable, Identifiable {
+struct APIComputer: Decodable, Identifiable {
     let id: Int
     let name: String
     let pluginCount: Int

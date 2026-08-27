@@ -1,7 +1,7 @@
 import Foundation
 
 @MainActor
-final class MachineSyncManager: ObservableObject {
+final class ComputerSyncManager: ObservableObject {
     @Published var isSyncing = false
     @Published var lastSyncError: String?
     @Published var lastSyncedAt: Date?
@@ -10,8 +10,8 @@ final class MachineSyncManager: ObservableObject {
         isSyncing = true
         lastSyncError = nil
         do {
-            let machine = try await APIClient.registerMachine(name: MachineIdentity.name)
-            try await APIClient.syncPlugins(machineID: machine.id, plugins: pluginManager.plugins)
+            let computer = try await APIClient.registerComputer(name: ComputerIdentity.name)
+            try await APIClient.syncPlugins(computerID: computer.id, plugins: pluginManager.plugins)
             try await APIClient.syncProjects(liveProjectManager.folders)
             lastSyncedAt = Date()
         } catch {

@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-// Minimal Keychain wrapper for small string secrets (JWT, machine ID).
+// Minimal Keychain wrapper for small string secrets (JWT, computer ID).
 // The app is unsandboxed (see AudioBunny.entitlements), so default Keychain
 // access works with no extra entitlement.
 enum KeychainStore {
