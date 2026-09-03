@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import AppKit
 
 let appVersion = "1.0.0"
 
@@ -31,6 +32,21 @@ struct AudioBunnyApp: App {
                 .task {
                     downloadManager.pluginManager = pluginManager
                     pluginManager.refresh()
+                }
+                // The web app's "Open in Mac App" button on /computers links
+                // here (audiobunny://sync — or bare audiobunny:// to just
+                // bring the app forward). Distinct from the OAuth sign-in
+                // callback on the same "audiobunny" scheme
+                // (audiobunny://oauth-callback/...) — that one's captured
+                // directly by ASWebAuthenticationSession and never reaches
+                // this handler at all, so there's no overlap to guard against.
+                .onOpenURL { url in
+                    guard url.scheme == "audiobunny" else { return }
+                    NSApp.activate(ignoringOtherApps: true)
+                    guard url.host == "sync", presetManager.currentUser != nil else { return }
+                    Task {
+                        await computerSyncManager.syncNow(pluginManager: pluginManager, liveProjectManager: liveProjectManager)
+                    }
                 }
         }
         .windowStyle(.titleBar)
