@@ -1,0 +1,66 @@
+import XCTest
+import AudioToolbox
+@testable import AudioBunny
+
+final class PluginIdentityTests: XCTestCase {
+
+    // MARK: auCodeString
+
+    func testAUCodeStringPreservesAllFourBytesIncludingSpaces() {
+        // 'aumu'
+        XCTAssertEqual(auCodeString(0x61756D75), "aumu")
+        // 'out ' — trailing space must survive (unlike the display formatter)
+        XCTAssertEqual(auCodeString(0x6F757420), "out ")
+    }
+
+    // MARK: identityKey
+
+    private func au(name: String, manufacturer: String = "M",
+                    desc: AudioComponentDescription? = nil) -> AudioPlugin {
+        AudioPlugin(name: name, manufacturer: manufacturer, type: .audioUnit,
+                    fileURL: URL(fileURLWithPath: "/tmp/\(name).component"),
+                    version: "1.0", componentDescription: desc)
+    }
+
+    func testAudioUnitIdentityIsItsCodesNotItsPath() {
+        var desc = AudioComponentDescription()
+        desc.componentType = 0x61756D75      // 'aumu'
+        desc.componentSubType = 0x4E696638   // 'Nif8'
+        desc.componentManufacturer = 0x2D4E492D // '-NI-'
+
+        let a = au(name: "FM8", desc: desc)
+        let b = AudioPlugin(name: "FM8 renamed", manufacturer: "x", type: .audioUnit,
+                            fileURL: URL(fileURLWithPath: "/somewhere/else.component"),
+                            version: "9", componentDescription: desc)
+
+        // Same component codes → same identity regardless of name or location.
+        XCTAssertEqual(a.identityKey, b.identityKey)
+        XCTAssertEqual(a.identityKey, "au:aumu/Nif8/-NI-")
+    }
+
+    func testTwoComponentsSharingOneBundleGetDistinctIdentities() {
+        var instrument = AudioComponentDescription()
+        instrument.componentType = 0x61756D75      // 'aumu'
+        instrument.componentSubType = 0x4E696638
+        instrument.componentManufacturer = 0x2D4E492D
+        var midiFX = instrument
+        midiFX.componentType = 0x61756D66          // 'aumf'
+
+        // Both are the FM8 bundle, but must not collapse into one row.
+        XCTAssertNotEqual(au(name: "FM8", desc: instrument).identityKey,
+                          au(name: "FM8 MFX", desc: midiFX).identityKey)
+    }
+
+    func testAudioUnitWithoutDescriptionFallsBackToNameAndManufacturer() {
+        // e.g. a bundle found only in the Disabled folder, with no live component.
+        let p = au(name: "SausageFattener", manufacturer: "Dada Life")
+        XCTAssertEqual(p.identityKey, "au:sausagefattener|dada life")
+    }
+
+    func testVSTIdentityIsItsBundlePath() {
+        let p = AudioPlugin(name: "Serum", manufacturer: "Xfer", type: .vst3,
+                            fileURL: URL(fileURLWithPath: "/Library/Audio/Plug-Ins/VST3/Serum.vst3"),
+                            version: "1.0")
+        XCTAssertEqual(p.identityKey, "VST 3:/Library/Audio/Plug-Ins/VST3/Serum.vst3")
+    }
+}

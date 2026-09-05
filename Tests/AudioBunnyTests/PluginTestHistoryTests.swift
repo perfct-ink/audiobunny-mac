@@ -31,10 +31,27 @@ final class PluginTestHistoryTests: XCTestCase {
         XCTAssertNil(manager.testHistoryKey(for: plugin(version: nil)))
     }
 
-    func testKeyIncludesTypeNameAndVersion() {
+    func testKeyIncludesOSBuildTypeNameAndVersion() {
         let manager = PluginManager(userDefaults: defaults)
         let key = manager.testHistoryKey(for: plugin(name: "Serum", type: .vst3, version: "1.2.3"))
-        XCTAssertEqual(key, "VST 3|serum|1.2.3")
+        // Scoped to the current macOS build so an OS update invalidates results.
+        XCTAssertEqual(key, "\(currentOSBuild())|VST 3|serum|1.2.3")
+        XCTAssertTrue(key!.hasSuffix("|VST 3|serum|1.2.3"))
+        XCTAssertFalse(key!.hasPrefix("|"), "OS build prefix should not be empty")
+    }
+
+    func testResultsFromOtherOSBuildsAreDropped() {
+        let manager = PluginManager(userDefaults: defaults)
+        // A record left over from a previous macOS build.
+        let staleKey = "OLDBUILD|VST 3|serum|1.2.3"
+        let stale = ["OLDBUILD|VST 3|serum|1.2.3": PluginManager.TestHistoryRecord(statusKind: "active", failureMessage: nil)]
+        defaults.set(try! JSONEncoder().encode(stale), forKey: "audiobunny.pluginTestHistory")
+
+        let p = plugin(name: "Other", version: "9.9")
+        p.status = .active
+        manager.recordTestResult(for: p)
+
+        XCTAssertNil(manager.loadTestHistory()[staleKey])
     }
 
     func testRecordingActiveResultPersists() {

@@ -38,6 +38,7 @@ struct ContentView: View {
     @EnvironmentObject var computerSyncManager: ComputerSyncManager
     @State private var selectedPlugin: AudioPlugin? = nil
     @State private var showAccountSheet = false
+    @State private var showComputersSheet = false
     @AppStorage("audiobunny.activeTab") private var activeTab: AppTab = .browse
 
     var body: some View {
@@ -74,6 +75,9 @@ struct ContentView: View {
         .sheet(isPresented: $showAccountSheet) {
             AccountSheet(isPresented: $showAccountSheet)
                 .environmentObject(presetManager)
+        }
+        .sheet(isPresented: $showComputersSheet) {
+            OtherComputersSheet(isPresented: $showComputersSheet)
         }
         .onChange(of: presetManager.currentUser) { newValue in
             guard newValue != nil else { return }
@@ -133,6 +137,15 @@ struct ContentView: View {
                 }
                 .disabled(manager.isScanning)
                 .help("Rescan for plugins")
+
+                if presetManager.currentUser != nil {
+                    Button {
+                        showComputersSheet = true
+                    } label: {
+                        Label("Computers", systemImage: "desktopcomputer")
+                    }
+                    .help("See plugins installed on your other Macs")
+                }
             }
 
             // Plain HStack instead of NavigationSplitView: macOS automatically
@@ -543,13 +556,7 @@ struct PluginTypeTag: View {
         }
     }
 
-    private var color: Color {
-        switch type {
-        case .audioUnit: return .blue
-        case .vst2: return Color(red: 0.36, green: 0.16, blue: 0.56)
-        case .vst3: return Color(red: 0.68, green: 0.42, blue: 0.98)
-        }
-    }
+    private var color: Color { pluginFormatColor(label) }
 }
 
 // MARK: - Status Badge
@@ -682,7 +689,7 @@ struct PluginDetailView: View {
                                 Label("Re-enable", systemImage: "checkmark.circle")
                             }
                             .buttonStyle(.bordered)
-                            .help("Plugin will be moved back to: \(manager.restorePath(for: plugin.type))")
+                            .help("Plugin will be moved back to: \(manager.restorePath(for: plugin))")
                         } else {
                             Button(action: { manager.disablePlugin(plugin) }) {
                                 Label("Disable", systemImage: "xmark.circle")
@@ -712,17 +719,7 @@ struct PluginDetailView: View {
 
                 // Plugin info
                 GroupBox("Plugin Information") {
-                    VStack(spacing: 0) {
-                        ForEach(groupVariants) { variant in
-                            locationRow(variant)
-                        }
-                        if let sub = plugin.subtypeString {
-                            infoRow("Subtype", sub)
-                        }
-                        if let mfr = plugin.manufacturerCodeString {
-                            infoRow("Manufacturer Code", mfr)
-                        }
-                    }
+                    SeparatedRows(rows: pluginInfoRows)
                 }
 
                 // Category (only shown when auto-detection couldn't tell instrument vs. effect)
@@ -759,43 +756,31 @@ struct PluginDetailView: View {
         }
     }
 
-    @ViewBuilder
-    private func infoRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .top) {
-            Text(label)
-                .foregroundStyle(.secondary)
-                .frame(width: 140, alignment: .leading)
-            Text(value)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    /// Location rows (one per installed format) followed by any AU code rows.
+    private var pluginInfoRows: [AnyView] {
+        var rows: [AnyView] = groupVariants.map { AnyView(PluginLocationRow(variant: $0)) }
+        if let sub = plugin.subtypeString {
+            rows.append(infoRow("Subtype", sub))
         }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 8)
-        Divider()
+        if let mfr = plugin.manufacturerCodeString {
+            rows.append(infoRow("Manufacturer Code", mfr))
+        }
+        return rows
     }
 
-    @ViewBuilder
-    private func locationRow(_ variant: AudioPlugin) -> some View {
-        HStack(alignment: .top) {
-            Text("Location (\(variant.type.rawValue))")
-                .foregroundStyle(.secondary)
-                .frame(width: 140, alignment: .leading)
-            Text(variant.fileURL.path)
-                .textSelection(.enabled)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Button {
-                NSWorkspace.shared.activateFileViewerSelecting([variant.fileURL])
-            } label: {
-                Image(systemName: "folder")
+    private func infoRow(_ label: String, _ value: String) -> AnyView {
+        AnyView(
+            HStack(alignment: .top) {
+                Text(label)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 140, alignment: .leading)
+                Text(value)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.plain)
-            .help("Show in Finder")
-        }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 8)
-        Divider()
+            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+        )
     }
 
     private var typeColor: Color {
@@ -812,6 +797,59 @@ struct PluginDetailView: View {
         case .effect: return .orange
         case nil: return .secondary
         }
+    }
+}
+
+// MARK: - Plugin Location Row (one install location; disable/enable it on its own)
+
+struct PluginLocationRow: View {
+    @ObservedObject var variant: AudioPlugin
+    @EnvironmentObject var manager: PluginManager
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text("Location (\(variant.type.rawValue))")
+                .foregroundStyle(.secondary)
+                .frame(width: 140, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(variant.fileURL.path)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if variant.isDisabled {
+                    Text("Disabled — moved to \(manager.disabledFolderURL.path)")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if variant.isDisabled {
+                Button { manager.enablePlugin(variant) } label: {
+                    Image(systemName: "checkmark.circle")
+                }
+                .buttonStyle(.plain)
+                .help("Re-enable just this location — moves it back to \(manager.restorePath(for: variant))")
+            } else {
+                Button { manager.disablePlugin(variant) } label: {
+                    Image(systemName: "xmark.circle")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.orange)
+                .help("Disable just this location, leaving other formats of this plugin active")
+            }
+
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([variant.fileURL])
+            } label: {
+                Image(systemName: "folder")
+            }
+            .buttonStyle(.plain)
+            .help("Show in Finder")
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
     }
 }
 

@@ -255,15 +255,14 @@ struct PluginDiscoverCard: View {
             .help(plugin.category.label)
     }
 
-    // Text only — no icon
+    // Text only — no icon. Colour matches the My Plugins list badges.
     @ViewBuilder
     private func formatBadge(_ format: String) -> some View {
         Text(format)
-            .font(.caption2).fontWeight(.medium)
+            .font(.caption2).fontWeight(.semibold)
             .padding(.horizontal, 5).padding(.vertical, 2)
-            .background(Color.secondary.opacity(0.1))
-            .foregroundStyle(.secondary)
-            .cornerRadius(4)
+            .background(pluginFormatColor(format), in: RoundedRectangle(cornerRadius: 4))
+            .foregroundStyle(.white)
     }
 
     private var priceBadge: some View {
@@ -378,11 +377,10 @@ struct CatalogPluginDetailPage: View {
                 .cornerRadius(6)
             ForEach(plugin.formats, id: \.self) { format in
                 Text(format)
-                    .font(.caption).fontWeight(.medium)
+                    .font(.caption).fontWeight(.semibold)
                     .padding(.horizontal, 7).padding(.vertical, 3)
-                    .background(Color.secondary.opacity(0.1))
-                    .foregroundStyle(.secondary)
-                    .cornerRadius(6)
+                    .background(pluginFormatColor(format), in: RoundedRectangle(cornerRadius: 6))
+                    .foregroundStyle(.white)
             }
             Text(plugin.price)
                 .font(.caption).fontWeight(.semibold)
@@ -439,28 +437,58 @@ struct CatalogPluginDetailPage: View {
 
     private var detailsSection: some View {
         GroupBox("Details") {
-            VStack(spacing: 0) {
-                detailRow("Developer", plugin.developer)
-                detailRow("Version",   plugin.version)
-                detailRow("Category",  plugin.category.label)
-                detailRow("Formats",   plugin.formats.joined(separator: ", "))
-                detailRow("Price",     plugin.price)
-            }
+            SeparatedRows(rows: detailRows)
         }
     }
 
-    @ViewBuilder
-    private func detailRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .top) {
-            Text(label)
-                .foregroundStyle(.secondary)
-                .frame(width: 100, alignment: .leading)
-            Text(value)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    private var detailRows: [AnyView] {
+        var rows: [AnyView] = [
+            detailRow("Developer", plugin.developer),
+            detailRow("Version",   plugin.version),
+            detailRow("Category",  plugin.category.label),
+            detailRow("Formats",   plugin.formats.joined(separator: ", ")),
+            detailRow("Price",     plugin.price),
+        ]
+        if let site = websiteURL {
+            rows.append(AnyView(
+                HStack(alignment: .top) {
+                    Text("Website")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 100, alignment: .leading)
+                    Link(destination: site) {
+                        HStack(spacing: 4) {
+                            Text(site.host ?? site.absoluteString).lineLimit(1).truncationMode(.middle)
+                            Image(systemName: "arrow.up.right.square")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.vertical, 7).padding(.horizontal, 8)
+            ))
         }
-        .padding(.vertical, 7).padding(.horizontal, 8)
-        Divider()
+        return rows
+    }
+
+    /// The plugin's (or its developer's) website, if it published a usable one.
+    private var websiteURL: URL? {
+        let s = plugin.websiteURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, let url = URL(string: s),
+              url.scheme == "http" || url.scheme == "https" else { return nil }
+        return url
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> AnyView {
+        AnyView(
+            HStack(alignment: .top) {
+                Text(label)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 100, alignment: .leading)
+                Text(value)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.vertical, 7).padding(.horizontal, 8)
+        )
     }
 
     // MARK: Tags

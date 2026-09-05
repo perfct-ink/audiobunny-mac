@@ -94,6 +94,16 @@ enum APIClient {
         let _: OkResponse = try await decode(perform: req)
     }
 
+    /// Every computer registered on the signed-in account (this one included).
+    static func listComputers() async throws -> [APIComputer] {
+        try await get("computers")
+    }
+
+    /// The plugin list from that computer's most recent `syncPlugins` call.
+    static func computerPlugins(_ computerID: Int) async throws -> [APIComputerPlugin] {
+        try await get("computers/\(computerID)/plugins")
+    }
+
     static func syncProjects(_ folders: [ProjectFolder]) async throws {
         var req = try makeRequest("sync/projects", method: "POST")
         let payload = folders.flatMap { $0.projects }.map { project -> [String: Any] in

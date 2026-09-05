@@ -66,4 +66,43 @@ final class LiveProjectManagerPersistenceTests: XCTestCase {
         XCTAssertTrue(manager.folders.isEmpty)
         XCTAssertEqual(defaults.stringArray(forKey: "audiobunny.projectFolderPaths"), [])
     }
+
+    // MARK: - Backup-folder filtering
+
+    func testIncludeBackupProjectsDefaultsOffAndPersists() {
+        let first = LiveProjectManager(userDefaults: defaults, autoRescanOnLaunch: false)
+        XCTAssertFalse(first.includeBackupProjects)
+
+        first.includeBackupProjects = true
+
+        let second = LiveProjectManager(userDefaults: defaults, autoRescanOnLaunch: false)
+        XCTAssertTrue(second.includeBackupProjects)
+    }
+
+    func testIsBackupProjectURLMatchesOnlyBackupFolders() {
+        let live = URL(fileURLWithPath: "/Music/Song Project/Song.als")
+        let backup = URL(fileURLWithPath: "/Music/Song Project/Backup/Song [2024-01-02 120000].als")
+        let nestedBackup = URL(fileURLWithPath: "/Music/Song Project/Backup/Older/Song.als")
+        let lookalike = URL(fileURLWithPath: "/Music/Backups Archive/Song.als")
+
+        XCTAssertFalse(isBackupProjectURL(live))
+        XCTAssertTrue(isBackupProjectURL(backup))
+        XCTAssertTrue(isBackupProjectURL(nestedBackup))
+        XCTAssertFalse(isBackupProjectURL(lookalike))
+    }
+
+    // MARK: - Cloud placeholder detection
+
+    func testOrdinaryLocalFileIsNotACloudPlaceholder() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioBunnyTest-\(UUID().uuidString).als")
+        try Data("x".utf8).write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        XCTAssertFalse(isCloudPlaceholder(tmp))
+    }
+
+    func testMissingFileIsNotACloudPlaceholder() {
+        XCTAssertFalse(isCloudPlaceholder(URL(fileURLWithPath: "/no/such/file.als")))
+    }
 }

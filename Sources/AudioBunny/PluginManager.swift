@@ -114,9 +114,11 @@ class PluginManager: ObservableObject {
             return discovered
         }.value
 
-        // Deduplicate by file URL
-        var seen = Set<URL>()
-        let deduped = discovered.filter { seen.insert($0.fileURL).inserted }
+        // Deduplicate by stable identity — NOT by fileURL. AVAudioUnitComponent
+        // doesn't reliably expose a bundle path, so keying on one here used to
+        // collapse the whole AU list down to a couple of entries.
+        var seen = Set<String>()
+        let deduped = discovered.filter { seen.insert($0.identityKey).inserted }
 
         // Restore last known test result for plugins whose name+version we've
         // tested before (persists across launches — see recordTestResult).
@@ -128,10 +130,14 @@ class PluginManager: ObservableObject {
             plugin.status = record.status
         }
 
-        // Preserve existing (this-session) test results for plugins we already know about
-        let existingByURL = Dictionary(uniqueKeysWithValues: plugins.map { ($0.fileURL, $0.status) })
+        // Preserve existing (this-session) test results for plugins we already
+        // know about. Keyed by identity, not fileURL — distinct components can
+        // share one bundle (e.g. an instrument and its MIDI-effect variant), so
+        // fileURL is not unique here.
+        let existingByIdentity = Dictionary(plugins.map { ($0.identityKey, $0.status) },
+                                            uniquingKeysWith: { first, _ in first })
         for plugin in deduped {
-            if let existingStatus = existingByURL[plugin.fileURL], plugin.status != .disabled {
+            if let existingStatus = existingByIdentity[plugin.identityKey], plugin.status != .disabled {
                 plugin.status = existingStatus
             }
         }
@@ -199,9 +205,13 @@ class PluginManager: ObservableObject {
     /// Only plugins with a known version are tracked — without one we can't
     /// reliably tell "the same plugin, unchanged" from "a different install",
     /// so we'd rather re-test than silently misreport an untested plugin as OK.
+    ///
+    /// The key is also scoped to the current macOS build: a system update can
+    /// change whether a plugin loads, so after one every plugin drops back to
+    /// "untested" until it's re-tested on the new build.
     func testHistoryKey(for plugin: AudioPlugin) -> String? {
         guard let version = plugin.version else { return nil }
-        return "\(plugin.type.rawValue)|\(plugin.name.lowercased())|\(version)"
+        return "\(currentOSBuild())|\(plugin.type.rawValue)|\(plugin.name.lowercased())|\(version)"
     }
 
     func loadTestHistory() -> [String: TestHistoryRecord] {
@@ -224,6 +234,10 @@ class PluginManager: ObservableObject {
             return
         }
         var history = loadTestHistory()
+        // Drop results recorded against other macOS builds so the store doesn't
+        // grow without bound and stale-build entries can never be consulted.
+        let buildPrefix = "\(currentOSBuild())|"
+        history = history.filter { $0.key.hasPrefix(buildPrefix) }
         history[key] = record
         guard let data = try? JSONEncoder().encode(history) else { return }
         userDefaults.set(data, forKey: testHistoryDefaultsKey)
@@ -234,10 +248,27 @@ class PluginManager: ObservableObject {
     nonisolated private func scanAudioUnits() -> [AudioPlugin] {
         let manager = AVAudioUnitComponentManager.shared()
         let allComponents = manager.components(passingTest: { _, _ in true })
+        let bundleIndex = audioUnitBundleIndex()
 
-        return allComponents.map { component in
+        return allComponents.compactMap { component -> AudioPlugin? in
             let desc = component.audioComponentDescription
-            let fileURL = component.iconURL?.deletingLastPathComponent()
+
+            // `auvw` ("Cocoa view" / editor) components are the plugin-GUI half of
+            // a real AU, not independently loadable plugins — skip them.
+            if auCodeString(desc.componentType) == "auvw" { return nil }
+
+            // Resolve the bundle this component actually lives in by its 4-char
+            // codes. We used to derive this from `component.iconURL`, but that is
+            // empty or malformed for most plugins, so every AU collapsed onto the
+            // same bogus path and all but a couple were lost to the dedup pass.
+            let codeKey = AUCodeKey(
+                type: auCodeString(desc.componentType),
+                subtype: auCodeString(desc.componentSubType),
+                manufacturer: auCodeString(desc.componentManufacturer)
+            )
+            // A synthesised path only if the lookup misses (Apple's built-in
+            // speech/output units) — and it no longer affects dedup (see scan()).
+            let fileURL = bundleIndex[codeKey]
                 ?? URL(fileURLWithPath: "/Library/Audio/Plug-Ins/Components/\(component.name).component")
 
             return AudioPlugin(
@@ -250,6 +281,35 @@ class PluginManager: ObservableObject {
                 componentDescription: desc
             )
         }
+    }
+
+    /// Maps every installed Audio Unit (by the 4-char type/subtype/manufacturer
+    /// codes it registers under) to the `.component` bundle on disk that provides
+    /// it, read straight from each bundle's Info.plist `AudioComponents` array —
+    /// the authoritative source, and one that needs no code execution.
+    nonisolated private func audioUnitBundleIndex() -> [AUCodeKey: URL] {
+        var index: [AUCodeKey: URL] = [:]
+        let dirs = [
+            systemAUPath, userAUPath,
+            URL(fileURLWithPath: "/System/Library/Components"),
+            disabledFolderURL,
+        ]
+        for dir in dirs {
+            guard let entries = try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            ) else { continue }
+            for bundleURL in entries where bundleURL.pathExtension.lowercased() == "component" {
+                guard let info = Bundle(url: bundleURL)?.infoDictionary,
+                      let comps = info["AudioComponents"] as? [[String: Any]] else { continue }
+                for comp in comps {
+                    guard let type = comp["type"] as? String,
+                          let subtype = comp["subtype"] as? String,
+                          let manufacturer = comp["manufacturer"] as? String else { continue }
+                    index[AUCodeKey(type: type, subtype: subtype, manufacturer: manufacturer)] = bundleURL
+                }
+            }
+        }
+        return index
     }
 
     // MARK: - VST Discovery
@@ -449,45 +509,63 @@ class PluginManager: ObservableObject {
     private func movePlugin(_ plugin: AudioPlugin, toDisabled: Bool) async {
         let fm = FileManager.default
         let source = plugin.fileURL
+        let verb = toDisabled ? "disable" : "re-enable"
 
+        // Never move anything that isn't a plugin bundle sitting in a directory
+        // AudioBunny manages. Historically an AU's fileURL could be garbage; a
+        // privileged `mv` on a bad path is exactly what must never happen.
+        guard fm.fileExists(atPath: source.path), isSafePluginPath(source) else {
+            plugin.status = .failed("Couldn't \(verb) — \(source.lastPathComponent) isn't in a folder AudioBunny manages. Move it by hand instead.")
+            notifyPluginsChanged()
+            return
+        }
+
+        let destinationFolder: URL
         if toDisabled {
-            // Ensure disabled folder exists
-            try? fm.createDirectory(at: disabledFolderURL, withIntermediateDirectories: true)
-            let destination = disabledFolderURL.appendingPathComponent(source.lastPathComponent)
-            if fm.fileExists(atPath: destination.path) {
-                try? fm.removeItem(at: destination)
-            }
-            // Most plugins live under root-owned /Library/Audio/Plug-Ins/…, which
-            // a plain move can't touch — fall back to an admin-privileged move
-            // (same as Finder would prompt for) rather than silently failing.
-            let moved = await Task.detached(priority: .userInitiated) {
-                moveItemElevatingIfNeeded(from: source, to: destination)
-            }.value
-            if moved {
-                plugin.status = .disabled
-            } else {
-                plugin.status = .failed("Couldn't disable — permission denied moving \(source.lastPathComponent)")
-            }
+            destinationFolder = disabledFolderURL
+        } else {
+            // Put it back exactly where it came from — a plugin disabled out of
+            // the system `/Library/…` must not reappear under `~/Library/…`.
+            let origins = loadDisabledOrigins()
+            destinationFolder = origins[source.lastPathComponent].map { URL(fileURLWithPath: $0) }
+                ?? restoreDestination(for: plugin.type)
+        }
+
+        try? fm.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        let destination = destinationFolder.appendingPathComponent(source.lastPathComponent)
+
+        // If something is already parked at the destination, move it aside —
+        // never delete it. A stale copy here is still someone's plugin.
+        if fm.fileExists(atPath: destination.path) {
+            let stale = destination.deletingLastPathComponent()
+                .appendingPathComponent("\(destination.lastPathComponent).stale-\(Int(Date().timeIntervalSince1970))")
+            try? fm.moveItem(at: destination, to: stale)
+        }
+
+        // Most plugins live under root-owned /Library/Audio/Plug-Ins/…, which a
+        // plain move can't touch — fall back to an admin-privileged move (macOS
+        // shows its standard auth prompt) rather than silently failing.
+        let moved = await Task.detached(priority: .userInitiated) {
+            moveItemElevatingIfNeeded(from: source, to: destination)
+        }.value
+
+        guard moved else {
+            plugin.status = .failed("Couldn't \(verb) \(source.lastPathComponent) — the file move was denied. Approve the macOS permission prompt, or move it by hand.")
+            notifyPluginsChanged()
+            return
+        }
+
+        var origins = loadDisabledOrigins()
+        if toDisabled {
+            origins[source.lastPathComponent] = source.deletingLastPathComponent().path
+            saveDisabledOrigins(origins)
+            plugin.status = .disabled
             notifyPluginsChanged()
         } else {
-            // Move back to the appropriate folder
-            let destinationFolder = restoreDestination(for: plugin.type)
-            try? fm.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
-            let destination = destinationFolder.appendingPathComponent(source.lastPathComponent)
-            if fm.fileExists(atPath: destination.path) {
-                try? fm.removeItem(at: destination)
-            }
-            let moved = await Task.detached(priority: .userInitiated) {
-                moveItemElevatingIfNeeded(from: source, to: destination)
-            }.value
-            if moved {
-                plugin.status = .untested
-                // Update the fileURL by rescanning
-                await scan()
-            } else {
-                plugin.status = .failed("Couldn't enable — permission denied moving \(source.lastPathComponent)")
-                notifyPluginsChanged()
-            }
+            origins.removeValue(forKey: source.lastPathComponent)
+            saveDisabledOrigins(origins)
+            plugin.status = .untested
+            await scan() // picks up the plugin's new location
         }
     }
 
@@ -499,8 +577,48 @@ class PluginManager: ObservableObject {
         }
     }
 
-    func restorePath(for type: PluginType) -> String {
-        restoreDestination(for: type).path
+    /// Where re-enabling would put this plugin back — its recorded origin if we
+    /// have one, otherwise the user plug-ins folder for its format.
+    func restorePath(for plugin: AudioPlugin) -> String {
+        loadDisabledOrigins()[plugin.fileURL.lastPathComponent]
+            ?? restoreDestination(for: plugin.type).path
+    }
+
+    /// True only for a real plugin bundle sitting directly inside one of the
+    /// plug-in directories AudioBunny knows about — the guard before any move.
+    nonisolated func isSafePluginPath(_ url: URL) -> Bool {
+        guard ["component", "vst", "vst3"].contains(url.pathExtension.lowercased()) else { return false }
+        let parent = url.deletingLastPathComponent().standardizedFileURL.path
+        let allowed = [
+            systemAUPath, userAUPath, systemVST2Path, userVST2Path,
+            systemVST3Path, userVST3Path, disabledFolderURL,
+            URL(fileURLWithPath: "/System/Library/Components"),
+        ]
+        return allowed.contains { $0.standardizedFileURL.path == parent }
+    }
+
+    // MARK: - Disabled-plugin origins (so re-enable restores the exact folder)
+
+    /// filename → the directory it was disabled out of. Persisted in Application
+    /// Support (not UserDefaults) so it survives even a defaults reset.
+    nonisolated private var disabledOriginsFileURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AudioBunny", isDirectory: true)
+        return dir.appendingPathComponent("disabled-origins.json")
+    }
+
+    nonisolated func loadDisabledOrigins() -> [String: String] {
+        guard let data = try? Data(contentsOf: disabledOriginsFileURL),
+              let map = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        return map
+    }
+
+    nonisolated private func saveDisabledOrigins(_ map: [String: String]) {
+        let url = disabledOriginsFileURL
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(map) else { return }
+        try? data.write(to: url, options: .atomic)
     }
 
     // MARK: - Delete (Uninstall)
@@ -514,6 +632,57 @@ class PluginManager: ObservableObject {
             } catch {
                 print("Failed to delete \(plugin.name): \(error)")
             }
+        }
+    }
+}
+
+// MARK: - Audio Unit identity helpers
+
+/// The literal 4-character codes an Audio Unit registers under, as written in a
+/// `.component` bundle's Info.plist `AudioComponents` array. Used to pair an
+/// `AVAudioUnitComponent` (which only hands us OSType integers) with its bundle.
+struct AUCodeKey: Hashable {
+    let type: String
+    let subtype: String
+    let manufacturer: String
+}
+
+/// An OSType as its raw 4-byte string, WITHOUT the whitespace trimming that
+/// `AudioPlugin`'s display formatter applies — codes like `"appl"`, `"-NI-"` or
+/// `"out "` must round-trip byte-for-byte to match Info.plist entries.
+func auCodeString(_ value: OSType) -> String {
+    let bytes: [UInt8] = [
+        UInt8((value >> 24) & 0xFF), UInt8((value >> 16) & 0xFF),
+        UInt8((value >> 8) & 0xFF), UInt8(value & 0xFF),
+    ]
+    return String(bytes: bytes, encoding: .isoLatin1) ?? ""
+}
+
+/// The Mac's current OS build string (e.g. "24F74"). Plugin test results are
+/// scoped to it — see `PluginManager.testHistoryKey`.
+func currentOSBuild() -> String {
+    if let dict = NSDictionary(contentsOfFile: "/System/Library/CoreServices/SystemVersion.plist"),
+       let build = dict["ProductBuildVersion"] as? String {
+        return build
+    }
+    return ProcessInfo.processInfo.operatingSystemVersionString
+}
+
+extension AudioPlugin {
+    /// Stable across rescans and independent of file location, so it survives the
+    /// plugin being moved in and out of the Disabled folder. AU: its 4-char codes
+    /// (or name+manufacturer when we have no component description, e.g. a bundle
+    /// found only in the Disabled folder). VST: the bundle path, which is real
+    /// and unique. This is the dedup key in `PluginManager.scan()`.
+    var identityKey: String {
+        switch type {
+        case .audioUnit:
+            if let d = audioComponentDescription {
+                return "au:\(auCodeString(d.componentType))/\(auCodeString(d.componentSubType))/\(auCodeString(d.componentManufacturer))"
+            }
+            return "au:\(name.lowercased())|\(manufacturer.lowercased())"
+        case .vst2, .vst3:
+            return "\(type.rawValue):\(fileURL.standardizedFileURL.path)"
         }
     }
 }

@@ -25,10 +25,30 @@ struct APIComputer: Decodable, Identifiable {
     let id: Int
     let name: String
     let pluginCount: Int
+    /// Optional so this still decodes against a server that doesn't send it yet.
+    let lastSyncedAt: Date?
 
     enum CodingKeys: String, CodingKey {
         case id, name
         case pluginCount = "plugin_count"
+        case lastSyncedAt = "last_synced_at"
+    }
+}
+
+/// One plugin as reported by another computer's last sync (see
+/// `APIClient.computerPlugins` / `ComputerSyncManager`). Mirrors the shape
+/// `syncPlugins` uploads.
+struct APIComputerPlugin: Decodable, Identifiable {
+    let name: String
+    let manufacturer: String
+    let pluginType: String
+    let version: String?
+
+    var id: String { "\(pluginType)|\(manufacturer)|\(name)".lowercased() }
+
+    enum CodingKeys: String, CodingKey {
+        case name, manufacturer, version
+        case pluginType = "plugin_type"
     }
 }
 

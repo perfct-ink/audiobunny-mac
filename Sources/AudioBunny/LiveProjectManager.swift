@@ -47,6 +47,25 @@ func parseAbletonProject(at url: URL) throws -> LiveProject {
     return LiveProject(url: url, plugins: plugins)
 }
 
+/// True if `url` lives inside an Ableton "Backup" folder — the timestamped set
+/// copies Live writes to `.../Some Project/Backup/Some Project [2024-01-02 …].als`.
+/// These aren't projects you actively work on, so `My Projects` skips them
+/// unless "Include Backups" is turned on.
+func isBackupProjectURL(_ url: URL) -> Bool {
+    url.pathComponents.dropLast().contains { $0.caseInsensitiveCompare("Backup") == .orderedSame }
+}
+
+/// True if `url` is an iCloud / File-Provider item whose contents aren't on this
+/// Mac yet. Reading such a file triggers a full download, so `My Projects` lists
+/// it but leaves it unparsed until the user fetches it.
+func isCloudPlaceholder(_ url: URL) -> Bool {
+    guard let values = try? url.resourceValues(forKeys: [
+        .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey,
+    ]) else { return false }
+    guard values.isUbiquitousItem == true else { return false }
+    return values.ubiquitousItemDownloadingStatus == .notDownloaded
+}
+
 /// Parses with an overall time budget. decompressAbletonFile already bounds
 /// the gunzip step itself, but this is the outer safety net in case parsing
 /// as a whole doesn't finish in time — nil means "genuinely failed, skip it"
@@ -165,7 +184,20 @@ class LiveProjectManager: ObservableObject {
     @Published var folders: [ProjectFolder] = []
 
     private let savedPathsKey = "audiobunny.projectFolderPaths"
+    private let includeBackupsKey = "audiobunny.includeBackupProjects"
     private let userDefaults: UserDefaults
+
+    /// When false (the default), `.als` files inside an Ableton "Backup" folder
+    /// are skipped when scanning. Toggling this rescans every folder.
+    @Published var includeBackupProjects: Bool {
+        didSet {
+            guard includeBackupProjects != oldValue else { return }
+            userDefaults.set(includeBackupProjects, forKey: includeBackupsKey)
+            for folder in folders {
+                Task { await rescan(folderID: folder.id) }
+            }
+        }
+    }
 
     /// - Parameters:
     ///   - userDefaults: injectable for testing; defaults to the app's real defaults.
@@ -173,6 +205,7 @@ class LiveProjectManager: ObservableObject {
     ///     Disabled in tests that only care about persisted paths, not live scan results.
     init(userDefaults: UserDefaults = .standard, autoRescanOnLaunch: Bool = true) {
         self.userDefaults = userDefaults
+        self.includeBackupProjects = userDefaults.bool(forKey: includeBackupsKey)
         let paths = userDefaults.stringArray(forKey: savedPathsKey) ?? []
         folders = paths.map { ProjectFolder(url: URL(fileURLWithPath: $0)) }
         guard autoRescanOnLaunch else { return }
@@ -209,31 +242,38 @@ class LiveProjectManager: ObservableObject {
         folders[idx].scanCurrentFile = "Finding projects…"
         folders[idx].projects = []
 
-        // First pass: enumerate all .als paths (fast, no decompression)
-        let alsURLs: [URL] = await Task.detached(priority: .userInitiated) {
-            var urls: [URL] = []
+        // First pass: enumerate all .als paths (fast, no decompression), noting
+        // which are cloud placeholders that must not be read yet.
+        let includeBackups = includeBackupProjects
+        let scanned: [(url: URL, cloud: Bool)] = await Task.detached(priority: .userInitiated) {
+            var results: [(URL, Bool)] = []
             let accessing = url.startAccessingSecurityScopedResource()
             defer { if accessing { url.stopAccessingSecurityScopedResource() } }
             guard let enumerator = FileManager.default.enumerator(
                 at: url,
                 includingPropertiesForKeys: [.isRegularFileKey],
                 options: [.skipsHiddenFiles]
-            ) else { return urls }
+            ) else { return results }
             for case let fileURL as URL in enumerator {
-                if fileURL.pathExtension.lowercased() == "als" { urls.append(fileURL) }
+                guard fileURL.pathExtension.lowercased() == "als" else { continue }
+                if !includeBackups && isBackupProjectURL(fileURL) { continue }
+                results.append((fileURL, isCloudPlaceholder(fileURL)))
             }
-            return urls
+            return results
         }.value
 
-        guard let idx2 = folders.firstIndex(where: { $0.id == folderID }) else { return }
-        folders[idx2].scanTotalCount = alsURLs.count
+        let alsURLs = scanned.map(\.url)
+        let cloudURLs = Set(scanned.filter(\.cloud).map(\.url))
 
-        // Show every discovered project immediately as a pending placeholder
-        // (name known, no plugin data yet), sorted up front — the sidebar list
-        // fills in as each one is actually scanned below, instead of projects
-        // trickling in one at a time as they finish parsing.
-        folders[idx2].projects = alsURLs
-            .map { LiveProject(url: $0, plugins: [], pending: true) }
+        guard let idx2 = folders.firstIndex(where: { $0.id == folderID }) else { return }
+        folders[idx2].scanTotalCount = alsURLs.count - cloudURLs.count
+
+        // Show every discovered project immediately as a placeholder (name known,
+        // no plugin data yet), sorted up front — parseable ones start "pending"
+        // and fill in below; cloud placeholders are listed as not-downloaded and
+        // left alone until the user fetches them.
+        folders[idx2].projects = scanned
+            .map { LiveProject(url: $0.url, plugins: [], pending: !$0.cloud, notDownloaded: $0.cloud) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
         // Second pass: parse every file, but each parse waits for a free slot
@@ -245,7 +285,7 @@ class LiveProjectManager: ObservableObject {
         var completedCount = 0
 
         await withTaskGroup(of: (URL, LiveProject?).self) { group in
-            for fileURL in alsURLs {
+            for fileURL in alsURLs where !cloudURLs.contains(fileURL) {
                 group.addTask {
                     (fileURL, await parseAbletonProjectThrottled(at: fileURL))
                 }
@@ -295,6 +335,42 @@ class LiveProjectManager: ObservableObject {
               let projectIdx2 = folders[folderIdx2].projects.firstIndex(where: { $0.id == projectID }) else { return }
         folders[folderIdx2].projects[projectIdx2].plugins = updated.plugins
         folders[folderIdx2].projects[projectIdx2].timedOut = updated.timedOut
+    }
+
+    /// Pulls a cloud-only project down from iCloud / the File Provider, then
+    /// parses it. Bounded — if it hasn't materialised in ~60s the project stays
+    /// marked not-downloaded.
+    func downloadProject(projectID: UUID) async {
+        guard let folderIdx = folders.firstIndex(where: { f in f.projects.contains { $0.id == projectID } }),
+              let projIdx = folders[folderIdx].projects.firstIndex(where: { $0.id == projectID }) else { return }
+        let url = folders[folderIdx].projects[projIdx].url
+        folders[folderIdx].projects[projIdx].pending = true
+
+        try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+
+        let downloaded = await Task.detached(priority: .utility) { () -> Bool in
+            for _ in 0..<120 {
+                if !isCloudPlaceholder(url) { return true }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+            return !isCloudPlaceholder(url)
+        }.value
+
+        guard let fIdx = folders.firstIndex(where: { f in f.projects.contains { $0.id == projectID } }),
+              let pIdx = folders[fIdx].projects.firstIndex(where: { $0.id == projectID }) else { return }
+
+        guard downloaded else {
+            folders[fIdx].projects[pIdx].pending = false   // still in the cloud
+            return
+        }
+        folders[fIdx].projects[pIdx].notDownloaded = false
+
+        let parsed = await parseAbletonProjectThrottled(at: url)
+        guard let fIdx2 = folders.firstIndex(where: { f in f.projects.contains { $0.id == projectID } }),
+              let pIdx2 = folders[fIdx2].projects.firstIndex(where: { $0.id == projectID }) else { return }
+        folders[fIdx2].projects[pIdx2].plugins = parsed?.plugins ?? []
+        folders[fIdx2].projects[pIdx2].timedOut = parsed?.timedOut ?? false
+        folders[fIdx2].projects[pIdx2].pending = false
     }
 
     var isScanning: Bool { folders.contains { $0.isScanning } }

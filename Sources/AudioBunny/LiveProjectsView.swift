@@ -15,6 +15,12 @@ struct LiveProjectsView: View {
     var body: some View {
         VStack(spacing: 0) {
             TabActionBar(title: "My Projects") {
+                Toggle(isOn: $liveProjectManager.includeBackupProjects) {
+                    Label("Include Backups", systemImage: "clock.arrow.circlepath")
+                }
+                .toggleStyle(.checkbox)
+                .help("Include projects inside Ableton \"Backup\" folders when scanning")
+
                 Button(action: pluginManager.refresh) {
                     Label("Rescan", systemImage: "arrow.clockwise")
                 }
@@ -252,6 +258,11 @@ struct ProjectSidebarRow: View {
                 ProgressView()
                     .scaleEffect(0.4)
                     .frame(width: 16, height: 16)
+            } else if project.notDownloaded {
+                Image(systemName: "icloud.and.arrow.down")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16)
+                    .help("In iCloud — not downloaded to this Mac")
             } else if project.timedOut {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)
@@ -266,7 +277,10 @@ struct ProjectSidebarRow: View {
                 Text(project.name)
                     .lineLimit(1)
                 let n = project.plugins.count
-                Text(project.pending ? "Scanning…" : (project.timedOut ? "Skipped (timed out)" : (n == 0 ? "No plugins" : "\(n) plugin\(n == 1 ? "" : "s")")))
+                Text(project.pending ? "Scanning…"
+                     : (project.notDownloaded ? "In iCloud — not downloaded"
+                        : (project.timedOut ? "Skipped (timed out)"
+                           : (n == 0 ? "No plugins" : "\(n) plugin\(n == 1 ? "" : "s")"))))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -288,17 +302,21 @@ struct ProjectSidebarRow: View {
                     Button {
                         isRescanning = true
                         Task {
-                            await liveProjectManager.rescanProject(projectID: project.id)
+                            if project.notDownloaded {
+                                await liveProjectManager.downloadProject(projectID: project.id)
+                            } else {
+                                await liveProjectManager.rescanProject(projectID: project.id)
+                            }
                             isRescanning = false
                         }
                     } label: {
-                        Image(systemName: "arrow.clockwise")
+                        Image(systemName: project.notDownloaded ? "icloud.and.arrow.down" : "arrow.clockwise")
                     }
                     .buttonStyle(.plain)
-                    .help("Rescan this project")
+                    .help(project.notDownloaded ? "Download from iCloud and scan" : "Rescan this project")
                 }
                 .foregroundStyle(.secondary)
-            } else if !project.pending && !project.timedOut && missingCount > 0 {
+            } else if !project.pending && !project.notDownloaded && !project.timedOut && missingCount > 0 {
                 HStack(spacing: 3) {
                     Image(systemName: "exclamationmark.circle.fill")
                         .foregroundStyle(.red)
@@ -354,7 +372,32 @@ struct ProjectDetailView: View {
 
             Divider()
 
-            if project.pending {
+            if project.notDownloaded {
+                VStack(spacing: 12) {
+                    Image(systemName: "icloud.and.arrow.down")
+                        .font(.system(size: 34, weight: .thin))
+                        .foregroundStyle(.secondary)
+                    Text("This project is in iCloud and hasn't been downloaded to this Mac.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    if isScanning {
+                        ProgressView("Downloading…")
+                    } else {
+                        Button {
+                            isScanning = true
+                            Task {
+                                await liveProjectManager.downloadProject(projectID: project.id)
+                                isScanning = false
+                            }
+                        } label: {
+                            Label("Download & Scan", systemImage: "icloud.and.arrow.down")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.horizontal, 24)
+            } else if project.pending {
                 VStack(spacing: 12) {
                     Text("This project hasn't been scanned yet.")
                         .foregroundStyle(.secondary)

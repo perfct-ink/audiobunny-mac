@@ -8,6 +8,7 @@ struct PresetsView: View {
     @EnvironmentObject var presetManager: PresetManager
     @State private var selectedPreset: APIPreset? = nil
     @State private var showUploadSheet = false
+    @State private var showSyncSheet = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,6 +23,13 @@ struct PresetsView: View {
                 .padding(.vertical, 6)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
                 .frame(width: 220)
+
+                Button {
+                    showSyncSheet = true
+                } label: {
+                    Label("Sync Presets", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .help("Link plugin preset folders to a shared folder across your Macs")
 
                 if presetManager.currentUser != nil {
                     Button {
@@ -58,6 +66,9 @@ struct PresetsView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
+        }
+        .sheet(isPresented: $showSyncSheet) {
+            PresetSyncSheet(isPresented: $showSyncSheet)
         }
         .sheet(isPresented: $showUploadSheet) {
             UploadPresetSheet(isPresented: $showUploadSheet)
@@ -353,17 +364,21 @@ struct PresetDetailView: View {
     @ViewBuilder
     private var detailsSection: some View {
         GroupBox("Details") {
-            VStack(spacing: 0) {
-                if let plugin = preset.pluginName { infoRow("Plugin", plugin) }
-                infoRow("Author", preset.author)
-                infoRow("Genre", preset.genre)
-                infoRow("File Type", ".\(preset.fileExtension.uppercased())")
-                if let size = preset.fileSizeBytes {
-                    infoRow("File Size", ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
-                }
-                if !preset.tags.isEmpty { infoRow("Tags", preset.tags.joined(separator: ", ")) }
-            }
+            SeparatedRows(pairs: detailPairs)
         }
+    }
+
+    private var detailPairs: [(String, String)] {
+        var pairs: [(String, String)] = []
+        if let plugin = preset.pluginName { pairs.append(("Plugin", plugin)) }
+        pairs.append(("Author", preset.author))
+        pairs.append(("Genre", preset.genre))
+        pairs.append(("File Type", ".\(preset.fileExtension.uppercased())"))
+        if let size = preset.fileSizeBytes {
+            pairs.append(("File Size", ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)))
+        }
+        if !preset.tags.isEmpty { pairs.append(("Tags", preset.tags.joined(separator: ", "))) }
+        return pairs
     }
 
     @ViewBuilder
@@ -424,15 +439,6 @@ struct PresetDetailView: View {
         isInstalling = false
     }
 
-    @ViewBuilder
-    private func infoRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .top) {
-            Text(label).foregroundStyle(.secondary).frame(width: 140, alignment: .leading)
-            Text(value).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.vertical, 6).padding(.horizontal, 8)
-        Divider()
-    }
 }
 
 // MARK: - Account Sheet
