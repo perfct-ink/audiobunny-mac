@@ -383,22 +383,54 @@ class PluginManager: ObservableObject {
 
     // MARK: - Plugin Testing
 
+    /// Progress of a "Test All" run — nil when one isn't in flight.
+    struct BatchTestProgress: Equatable {
+        var completed: Int
+        var total: Int
+        var currentPluginName: String
+    }
+    @Published private(set) var batchTestProgress: BatchTestProgress?
+    /// The in-flight "Test All" run, if any. Internal so tests can await it.
+    private(set) var batchTestTask: Task<Void, Never>?
+
+    var isTestingAll: Bool { batchTestTask != nil }
+
     func testPlugin(_ plugin: AudioPlugin) {
         Task {
             await performTest(plugin)
         }
     }
 
+    /// Tests every untested plugin one at a time, publishing progress as it
+    /// goes. Each test's blocking work runs off the main actor (see
+    /// `performTest`), so the list keeps updating live — statuses flip from
+    /// spinner to result one-by-one instead of the window freezing until the
+    /// whole run finishes.
     func testAllUntested() {
-        Task {
+        guard batchTestTask == nil else { return }
+        batchTestTask = Task {
+            defer { batchTestTask = nil }
+
             let untested = plugins.filter {
                 if case .untested = $0.status { return true }
                 return false
             }
-            for plugin in untested {
+            guard !untested.isEmpty else { return }
+
+            batchTestProgress = BatchTestProgress(completed: 0, total: untested.count, currentPluginName: "")
+            defer { batchTestProgress = nil }
+
+            for (index, plugin) in untested.enumerated() {
+                if Task.isCancelled { return }
+                batchTestProgress?.currentPluginName = plugin.name
                 await performTest(plugin)
+                batchTestProgress?.completed = index + 1
             }
         }
+    }
+
+    func cancelBatchTest() {
+        batchTestTask?.cancel()
     }
 
     private func performTest(_ plugin: AudioPlugin) async {
@@ -409,9 +441,9 @@ class PluginManager: ObservableObject {
         case .audioUnit:
             await testAudioUnit(plugin)
         case .vst2:
-            testVSTBundle(plugin, expectedSymbol: "VSTPluginMain")
+            await testVSTBundle(plugin, expectedSymbol: "VSTPluginMain")
         case .vst3:
-            testVSTBundle(plugin, expectedSymbol: "GetPluginFactory")
+            await testVSTBundle(plugin, expectedSymbol: "GetPluginFactory")
         }
 
         recordTestResult(for: plugin)
@@ -434,50 +466,55 @@ class PluginManager: ObservableObject {
             return
         }
 
-        return await withCheckedContinuation { continuation in
-            AVAudioUnit.instantiate(with: desc, options: []) { avAudioUnit, error in
-                Task { @MainActor in
-                    if let error = error {
-                        plugin.status = .failed(error.localizedDescription)
+        // `AVAudioUnit.instantiate` loads the plugin's code; a broken or very
+        // slow AU can leave the callback pending indefinitely, which would stall
+        // a whole "Test All" sweep. Bound it so the sweep keeps moving.
+        let outcome = await withTimeout(seconds: 12) {
+            await withCheckedContinuation { (continuation: CheckedContinuation<PluginStatus, Never>) in
+                AVAudioUnit.instantiate(with: desc, options: []) { avAudioUnit, error in
+                    if let error {
+                        continuation.resume(returning: .failed(error.localizedDescription))
                     } else if avAudioUnit != nil {
-                        plugin.status = .active
+                        continuation.resume(returning: .active)
                     } else {
-                        plugin.status = .failed("Could not instantiate")
+                        continuation.resume(returning: .failed("Could not instantiate"))
                     }
-                    continuation.resume()
                 }
             }
         }
+
+        switch outcome {
+        case .completed(let status): plugin.status = status
+        case .timedOut: plugin.status = .failed("Timed out")
+        }
     }
 
-    private func testVSTBundle(_ plugin: AudioPlugin, expectedSymbol: String) {
+    /// Inspects a VST bundle's symbol table for its entry point. The `nm`
+    /// subprocess (spawn + blocking read + wait) runs on a background thread so
+    /// a "Test All" sweep over many plugins never stalls the main actor.
+    private func testVSTBundle(_ plugin: AudioPlugin, expectedSymbol: String) async {
         let url = plugin.fileURL
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            plugin.status = .failed("File not found")
-            return
-        }
-
-        guard let bundle = Bundle(url: url),
-              let executableURL = bundle.executableURL else {
-            plugin.status = .failed("Cannot find bundle executable")
-            return
-        }
-
-        // Use nm to inspect the symbol table without loading the plugin code,
-        // avoiding crashes from buggy plugin initializers (EXC_BAD_ACCESS).
-        guard let data = runProcessCapturingStdout(
-            executable: "/usr/bin/nm",
-            arguments: ["-g", "--defined-only", executableURL.path]
-        ) else {
-            plugin.status = .failed("Cannot inspect binary")
-            return
-        }
-        let output = String(data: data, encoding: .utf8) ?? ""
-        if output.contains(expectedSymbol) {
-            plugin.status = .active
-        } else {
-            plugin.status = .failed("Missing entry point '\(expectedSymbol)'")
-        }
+        let status: PluginStatus = await Task.detached(priority: .userInitiated) {
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                return .failed("File not found")
+            }
+            guard let bundle = Bundle(url: url), let executableURL = bundle.executableURL else {
+                return .failed("Cannot find bundle executable")
+            }
+            // Read the symbol table without loading the plugin code, avoiding
+            // crashes from buggy plugin initializers (EXC_BAD_ACCESS).
+            guard let data = runProcessCapturingStdout(
+                executable: "/usr/bin/nm",
+                arguments: ["-g", "--defined-only", executableURL.path]
+            ) else {
+                return .failed("Cannot inspect binary")
+            }
+            let output = String(data: data, encoding: .utf8) ?? ""
+            return output.contains(expectedSymbol)
+                ? .active
+                : .failed("Missing entry point '\(expectedSymbol)'")
+        }.value
+        plugin.status = status
     }
 
     // MARK: - Disable / Enable

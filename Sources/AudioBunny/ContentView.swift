@@ -294,15 +294,45 @@ struct SidebarView: View {
                 Divider()
             }
 
-            Button(action: manager.testAllUntested) {
-                Label("Test All", systemImage: "play.circle")
-                    .frame(maxWidth: .infinity)
+            Group {
+                if let progress = manager.batchTestProgress {
+                    VStack(spacing: 4) {
+                        HStack(spacing: 8) {
+                            ProgressView(value: Double(progress.completed), total: Double(max(progress.total, 1)))
+                                .progressViewStyle(.linear)
+                            Button {
+                                manager.cancelBatchTest()
+                            } label: {
+                                Image(systemName: "stop.circle")
+                            }
+                            .buttonStyle(.plain)
+                            .help("Stop testing")
+                        }
+                        HStack(spacing: 4) {
+                            Text("Testing \(progress.completed) of \(progress.total)")
+                                .monospacedDigit()
+                            if !progress.currentPluginName.isEmpty {
+                                Text("· \(progress.currentPluginName)")
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                } else {
+                    Button(action: manager.testAllUntested) {
+                        Label("Test All", systemImage: "play.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(manager.isScanning)
+                    .help("Test all untested plugins")
+                }
             }
-            .buttonStyle(.bordered)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .disabled(manager.isScanning)
-            .help("Test all untested plugins")
 
             Divider()
 

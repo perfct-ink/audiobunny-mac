@@ -18,7 +18,7 @@ enum PluginType: String, CaseIterable {
     }
 }
 
-enum PluginStatus {
+enum PluginStatus: Sendable {
     case untested
     case testing
     case active
