@@ -23,6 +23,14 @@ struct SampleFolder: Identifiable {
 
 private let soundFileExtensions: Set<String> = ["wav", "aif", "aiff", "mp3", "m4a", "caf", "flac", "ogg"]
 
+/// Publishes the playing sample's 0…1 position on its own object, so the ~30 Hz
+/// updates only invalidate the waveform view — not the whole sample list, which
+/// observes `SampleManager` as a whole.
+@MainActor
+final class PlayheadClock: ObservableObject {
+    @Published var fraction: Double = 0
+}
+
 @MainActor
 class SampleManager: NSObject, ObservableObject {
     @Published var folders: [SampleFolder] = []
@@ -49,9 +57,14 @@ class SampleManager: NSObject, ObservableObject {
     /// computed on demand when a sample is selected or played.
     @Published private(set) var waveforms: [URL: Waveform] = [:]
 
-    /// Playback position (0...1) of the currently playing sample, for the
-    /// waveform playhead. 0 when nothing is playing.
-    @Published private(set) var playheadFraction: Double = 0
+    /// The playing sample's 0...1 position. On its own object so the ~30 Hz
+    /// updates only re-render the waveform bar, never the (potentially huge)
+    /// sample list, which observes `SampleManager` as a whole.
+    let playhead = PlayheadClock()
+
+    /// Vocabulary tags that actually occur in the scanned library — recomputed
+    /// only when folders or manual tags change, not per render.
+    @Published private(set) var availableTags: [String] = []
 
     /// Sample files auditioned this session — the list dims their rows so you
     /// can see what you've already heard while digging. Not persisted.
@@ -73,6 +86,15 @@ class SampleManager: NSObject, ObservableObject {
     private var playheadTask: Task<Void, Never>?
     private var waveformTask: Task<Void, Never>?
     private var playbackTask: Task<Void, Never>?
+    private var prewarmTask: Task<Void, Never>?
+
+    /// Auto-tags per sample, computed once per scan instead of per render.
+    private var autoTagsByURL: [URL: Set<String>] = [:]
+    /// Waveforms produced by the background pre-warm, merged into `waveforms` in
+    /// batches (see `stageWaveform`) so processing a big library doesn't
+    /// re-render the list once per file.
+    private var stagedWaveforms: [URL: Waveform] = [:]
+    private var waveformFlushTask: Task<Void, Never>?
 
     /// Ferries a non-Sendable value from a background task back to the main
     /// actor. Safe here: the `AVAudioPlayer` is created on the background task
@@ -106,6 +128,8 @@ class SampleManager: NSObject, ObservableObject {
     func removeFolder(_ id: UUID) {
         folders.removeAll { $0.id == id }
         persistFolders()
+        rebuildTagIndex()
+        prewarmWaveforms()
     }
 
     func rescan(folderID: UUID) {
@@ -150,7 +174,9 @@ class SampleManager: NSObject, ObservableObject {
         folders[idx2].samples = found.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         folders[idx2].isScanning = false
 
+        rebuildTagIndex()
         scheduleDurationLoading()
+        prewarmWaveforms()
     }
 
     // MARK: - Duration (loaded one file at a time in the background)
@@ -178,16 +204,21 @@ class SampleManager: NSObject, ObservableObject {
 
     // MARK: - Waveform
 
-    func waveform(for sample: SoundFile) -> Waveform? { waveforms[sample.url] }
+    func waveform(for sample: SoundFile) -> Waveform? {
+        waveforms[sample.url] ?? stagedWaveforms[sample.url]
+    }
 
-    /// Loads the waveform for `sample` — from the persistent `WaveformCache`
-    /// when it's there, otherwise computed and then cached. All of it runs on a
-    /// background (`.utility`) task so it never blocks the UI, and a still-running
-    /// job for a previous selection is cancelled — arrowing quickly through the
-    /// list only ever finishes the one you land on.
+    private func hasWaveform(_ url: URL) -> Bool {
+        waveforms[url] != nil || stagedWaveforms[url] != nil
+    }
+
+    /// Loads the waveform for `sample` right now — from the persistent
+    /// `WaveformCache` when it's there, otherwise computed and cached. Runs on a
+    /// background (`.utility`, ahead of the pre-warm) task so it never blocks the
+    /// UI, and a still-running job for a previous selection is cancelled.
     func loadWaveform(for sample: SoundFile) {
         let url = sample.url
-        if waveforms[url] != nil { return }
+        if hasWaveform(url) { return }
         waveformTask?.cancel()
         waveformTask = Task.detached(priority: .utility) { [weak self] in
             if let cached = await WaveformCache.shared.load(sourceURL: url) {
@@ -200,21 +231,68 @@ class SampleManager: NSObject, ObservableObject {
         }
     }
 
+    /// Immediate publish — the selected sample's waveform, which the user is
+    /// waiting on.
     private func storeWaveform(_ waveform: Waveform, for url: URL) {
+        stagedWaveforms[url] = nil
         waveforms[url] = waveform
     }
 
-    /// Removes every persisted waveform. The in-memory copies stay until the
-    /// tab is next rebuilt.
+    /// Batched publish — pre-warmed waveforms are merged into `waveforms` at
+    /// ~2 Hz so a big library doesn't re-render the list once per file.
+    private func stageWaveform(_ waveform: Waveform, for url: URL) {
+        guard waveforms[url] == nil else { return }
+        stagedWaveforms[url] = waveform
+        guard waveformFlushTask == nil else { return }
+        waveformFlushTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard let self else { return }
+            self.waveformFlushTask = nil
+            guard !self.stagedWaveforms.isEmpty else { return }
+            self.waveforms.merge(self.stagedWaveforms) { current, _ in current }
+            self.stagedWaveforms.removeAll()
+        }
+    }
+
+    /// Computes (and persists) a waveform for every scanned sample, one at a
+    /// time at background priority. Cache hits are near-free; misses fill the
+    /// disk cache so a later click is instant, and rows can show their waveform
+    /// without being selected first.
+    private func prewarmWaveforms() {
+        prewarmTask?.cancel()
+        let urls = folders.flatMap { $0.samples.map(\.url) }
+        guard !urls.isEmpty else { return }
+        prewarmTask = Task { [weak self] in
+            for url in urls {
+                if Task.isCancelled { return }
+                guard let self else { return }
+                if self.hasWaveform(url) { continue }
+                let waveform = await Task.detached(priority: .background) { () -> Waveform? in
+                    if let cached = await WaveformCache.shared.load(sourceURL: url) { return cached }
+                    guard let computed = computeWaveform(url: url) else { return nil }
+                    await WaveformCache.shared.store(computed, sourceURL: url)
+                    return computed
+                }.value
+                if let waveform { self.stageWaveform(waveform, for: url) }
+            }
+        }
+    }
+
+    /// Removes every persisted waveform and re-runs the pre-warm.
     func clearWaveformCache() {
-        Task { await WaveformCache.shared.clear() }
+        Task {
+            await WaveformCache.shared.clear()
+            waveforms.removeAll()
+            stagedWaveforms.removeAll()
+            prewarmWaveforms()
+        }
     }
 
     // MARK: - Seeking / playhead
 
     func seek(toFraction fraction: Double) {
         let clamped = min(max(fraction, 0), 1)
-        playheadFraction = clamped
+        playhead.fraction = clamped
         guard let player, player.duration > 0 else { return }
         player.currentTime = clamped * player.duration
     }
@@ -224,7 +302,7 @@ class SampleManager: NSObject, ObservableObject {
         playheadTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, let player = self.player, player.isPlaying, player.duration > 0 else { return }
-                self.playheadFraction = player.currentTime / player.duration
+                self.playhead.fraction = player.currentTime / player.duration
                 try? await Task.sleep(for: .milliseconds(33))
             }
         }
@@ -311,12 +389,16 @@ class SampleManager: NSObject, ObservableObject {
     func stop() {
         playbackTask?.cancel()
         playbackTask = nil
-        player?.stop()
-        player = nil
+        if let current = player {
+            player = nil
+            // Tearing down an AVAudioPlayer can stall briefly; do it off-main.
+            let boxed = Handoff(value: current)
+            Task.detached(priority: .utility) { boxed.value.stop() }
+        }
         currentlyPlayingID = nil
         playheadTask?.cancel()
         playheadTask = nil
-        playheadFraction = 0
+        playhead.fraction = 0
     }
 
     // MARK: - Favorites (copied into a folder on disk)
@@ -356,16 +438,24 @@ class SampleManager: NSObject, ObservableObject {
 
     // MARK: - Tags
 
-    /// Auto-detected tags (from the filename + parent folder) plus any the user
-    /// added by hand, sorted.
+    /// Auto-tags for `sample`, from the per-scan index (falling back to a live
+    /// compute for samples added outside `scan`, e.g. in tests).
+    private func cachedAutoTags(for sample: SoundFile) -> Set<String> {
+        autoTagsByURL[sample.url]
+            ?? autoTags(forFileName: sample.name, parentFolderName: sample.parentFolderName)
+    }
+
+    private func allTags(for sample: SoundFile) -> Set<String> {
+        cachedAutoTags(for: sample).union(manualTagsByPath[sample.url.path] ?? [])
+    }
+
+    /// Auto-detected tags plus any the user added by hand, sorted.
     func tags(for sample: SoundFile) -> [String] {
-        let auto = autoTags(forFileName: sample.name, parentFolderName: sample.parentFolderName)
-        let manual = manualTagsByPath[sample.url.path] ?? []
-        return auto.union(manual).sorted()
+        allTags(for: sample).sorted()
     }
 
     func isAutoTag(_ tag: String, for sample: SoundFile) -> Bool {
-        autoTags(forFileName: sample.name, parentFolderName: sample.parentFolderName).contains(tag)
+        cachedAutoTags(for: sample).contains(tag)
     }
 
     /// Adds or removes a manual tag. Auto-detected tags can't be removed (they'd
@@ -375,6 +465,7 @@ class SampleManager: NSObject, ObservableObject {
         if set.contains(tag) { set.remove(tag) } else { set.insert(tag) }
         manualTagsByPath[sample.url.path] = set.isEmpty ? nil : set
         persistTags()
+        refreshAvailableTags()
     }
 
     func toggleTagFilter(_ tag: String) {
@@ -386,7 +477,28 @@ class SampleManager: NSObject, ObservableObject {
     /// no filter is set).
     func visibleSamples(in folder: SampleFolder) -> [SoundFile] {
         guard !activeTagFilters.isEmpty else { return folder.samples }
-        return folder.samples.filter { activeTagFilters.isSubset(of: Set(tags(for: $0))) }
+        return folder.samples.filter { activeTagFilters.isSubset(of: allTags(for: $0)) }
+    }
+
+    /// Rebuilds the auto-tag index for every scanned sample. Called after a scan
+    /// or a folder removal — not per render.
+    private func rebuildTagIndex() {
+        var index: [URL: Set<String>] = [:]
+        for folder in folders {
+            for sample in folder.samples {
+                index[sample.url] = autoTags(forFileName: sample.name,
+                                             parentFolderName: sample.parentFolderName)
+            }
+        }
+        autoTagsByURL = index
+        refreshAvailableTags()
+    }
+
+    private func refreshAvailableTags() {
+        var present = Set<String>()
+        for tags in autoTagsByURL.values { present.formUnion(tags) }
+        for tags in manualTagsByPath.values { present.formUnion(tags) }
+        availableTags = sampleTagVocabulary.filter { present.contains($0) }
     }
 
     private func persistTags() {

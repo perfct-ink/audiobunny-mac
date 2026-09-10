@@ -11,8 +11,7 @@ struct SamplesView: View {
     }
 
     private var selectedSample: SoundFile? {
-        guard let id = sampleManager.selectedID else { return nil }
-        return sampleManager.folders.lazy.flatMap(\.samples).first { $0.id == id }
+        sampleManager.sample(withID: sampleManager.selectedID)
     }
 
     var body: some View {
@@ -62,12 +61,22 @@ struct SamplesView: View {
                 Divider()
             }
 
-            content
+            HStack(spacing: 0) {
+                content
 
-            if let sample = selectedSample {
-                Divider()
-                SampleWaveformBar(sample: sample)
+                if let sample = selectedSample {
+                    Divider()
+                    SampleInspector(playhead: sampleManager.playhead, sample: sample)
+                        .frame(width: 320)
+                }
             }
+        }
+        .background {
+            // Spacebar stops playback (there are no text fields on this tab).
+            Button("", action: sampleManager.stop)
+                .keyboardShortcut(.space, modifiers: [])
+                .opacity(0)
+                .accessibilityHidden(true)
         }
         .onChange(of: sampleManager.selectedID) { id in
             // Selecting a sample — a click or the arrow keys — plays it.
@@ -94,6 +103,7 @@ struct SamplesView: View {
                 title: "No Folders Added",
                 message: "Click \"Add Folder…\" to scan one or more directories for sound files."
             )
+            .frame(maxWidth: .infinity)
         } else {
             List(selection: $sampleManager.selectedID) {
                 ForEach(sampleManager.folders) { folder in
@@ -128,6 +138,7 @@ struct SamplesView: View {
                 }
             }
             .listStyle(.inset)
+            .frame(maxWidth: .infinity)
             .onMoveCommand { direction in
                 switch direction {
                 case .up:   sampleManager.selectPrevious()
@@ -144,19 +155,8 @@ struct SamplesView: View {
 struct SampleTagFilterBar: View {
     @EnvironmentObject var sampleManager: SampleManager
 
-    /// Only vocabulary tags that actually occur in the scanned library.
-    private var availableTags: [String] {
-        var present = Set<String>()
-        for folder in sampleManager.folders {
-            for sample in folder.samples {
-                present.formUnion(sampleManager.tags(for: sample))
-            }
-        }
-        return sampleTagVocabulary.filter { present.contains($0) }
-    }
-
     var body: some View {
-        let tags = availableTags
+        let tags = sampleManager.availableTags   // precomputed on scan, not per render
         if tags.isEmpty {
             EmptyView()
         } else {
@@ -298,27 +298,15 @@ struct SampleRow: View {
                         .truncationMode(.middle)
                         .help(sample.url.path)
                 }
-                let tags = sampleManager.tags(for: sample)
-                if !tags.isEmpty {
-                    HStack(spacing: 4) {
-                        ForEach(tags.prefix(6), id: \.self) { tag in
-                            Text(tag)
-                                .font(.system(size: 9, weight: .medium))
-                                .padding(.horizontal, 5).padding(.vertical, 1)
-                                .background(Color.secondary.opacity(0.12), in: Capsule())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
-            // Show the waveform inline once it's been loaded (cache hit, or
-            // computed for the selected sample) — never triggers a compute here.
+            // Inline waveform once it's been loaded (usually by the background
+            // pre-warm). Coarse resolution + a single fill keeps scrolling smooth.
             if let waveform = sampleManager.waveform(for: sample) {
-                WaveformView(waveform: waveform)
-                    .frame(width: 96, height: 22)
+                WaveformView(waveform: waveform, resolution: 3)
+                    .frame(width: 84, height: 20)
                     .allowsHitTesting(false)
             }
 
@@ -351,17 +339,6 @@ struct SampleRow: View {
             Button(isFavorited ? "Remove from Favorites" : "Add to Favorites") {
                 sampleManager.toggleFavorite(sample)
             }
-            Menu("Tags") {
-                let current = Set(sampleManager.tags(for: sample))
-                ForEach(sampleTagVocabulary, id: \.self) { tag in
-                    let auto = sampleManager.isAutoTag(tag, for: sample)
-                    Toggle(auto ? "\(tag) (auto)" : tag, isOn: Binding(
-                        get: { current.contains(tag) },
-                        set: { _ in sampleManager.toggleTag(tag, for: sample) }
-                    ))
-                    .disabled(auto)
-                }
-            }
             Button("Show in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([sample.url])
             }
@@ -369,59 +346,135 @@ struct SampleRow: View {
     }
 }
 
-// MARK: - Waveform bar (selected sample, with scrubbable playhead)
+// MARK: - Selected-sample inspector (right sidebar)
 
-struct SampleWaveformBar: View {
+struct SampleInspector: View {
     @EnvironmentObject var sampleManager: SampleManager
+    @ObservedObject var playhead: PlayheadClock
     let sample: SoundFile
 
+    private var isPlaying: Bool { sampleManager.currentlyPlayingID == sample.id }
+    private var isFavorited: Bool { sampleManager.isFavorited(sample) }
+
     var body: some View {
-        let isPlaying = sampleManager.currentlyPlayingID == sample.id
-        VStack(spacing: 5) {
-            HStack(spacing: 8) {
-                Button {
-                    sampleManager.togglePlay(sample)
-                } label: {
-                    Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(isPlaying ? Color.accentColor : .secondary)
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    sampleManager.isLooping.toggle()
-                } label: {
-                    Image(systemName: "repeat")
-                        .font(.callout)
-                        .foregroundStyle(sampleManager.isLooping ? Color.accentColor : .secondary)
-                }
-                .buttonStyle(.plain)
-                .help(sampleManager.isLooping ? "Looping — click to turn off" : "Loop the sample")
-
-                Text(sample.name)
-                    .font(.callout)
-                    .lineLimit(1)
-
-                Spacer()
-
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                header
+                transport
+                waveform
                 if let duration = sampleManager.duration(for: sample) {
-                    Text(formatSampleDuration(duration))
-                        .font(.caption2).monospacedDigit()
-                        .foregroundStyle(.secondary)
+                    LabeledContent("Length", value: formatSampleDuration(duration))
+                        .font(.callout)
                 }
+                Divider()
+                tagEditor
             }
-
-            WaveformView(
-                waveform: sampleManager.waveform(for: sample),
-                playhead: isPlaying ? sampleManager.playheadFraction : nil,
-                onScrub: { sampleManager.seek(toFraction: $0) }
-            )
-            .frame(height: 46)
+            .padding(16)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .frame(maxHeight: .infinity)
         .background(.bar)
         .onAppear { sampleManager.loadWaveform(for: sample) }
         .onChange(of: sample.id) { _ in sampleManager.loadWaveform(for: sample) }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(sample.name)
+                .font(.headline)
+                .lineLimit(2)
+            Text(sample.url.deletingLastPathComponent().path
+                .replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~"))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(sample.url.path)
+        }
+    }
+
+    private var transport: some View {
+        HStack(spacing: 14) {
+            Button {
+                sampleManager.togglePlay(sample)
+            } label: {
+                Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle.fill")
+                    .font(.system(size: 26))
+                    .foregroundStyle(isPlaying ? Color.accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                sampleManager.isLooping.toggle()
+            } label: {
+                Image(systemName: "repeat")
+                    .foregroundStyle(sampleManager.isLooping ? Color.accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help(sampleManager.isLooping ? "Looping — click to turn off" : "Loop the sample")
+
+            Button {
+                sampleManager.toggleFavorite(sample)
+            } label: {
+                Image(systemName: isFavorited ? "heart.fill" : "heart")
+                    .foregroundStyle(isFavorited ? .pink : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help(isFavorited ? "Remove from favorites folder" : "Copy to favorites folder")
+
+            Spacer()
+
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([sample.url])
+            } label: {
+                Image(systemName: "folder")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Show in Finder")
+        }
+    }
+
+    private var waveform: some View {
+        WaveformView(
+            waveform: sampleManager.waveform(for: sample),
+            playhead: isPlaying ? playhead.fraction : nil,
+            onScrub: { sampleManager.seek(toFraction: $0) }
+        )
+        .frame(height: 64)
+        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private var tagEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Tags").font(.subheadline).fontWeight(.semibold)
+            let current = Set(sampleManager.tags(for: sample))
+            FlowLayout(spacing: 6) {
+                ForEach(sampleTagVocabulary, id: \.self) { tag in
+                    let auto = sampleManager.isAutoTag(tag, for: sample)
+                    let on = current.contains(tag)
+                    Button {
+                        if !auto { sampleManager.toggleTag(tag, for: sample) }
+                    } label: {
+                        HStack(spacing: 3) {
+                            if auto { Image(systemName: "sparkles").font(.system(size: 8)) }
+                            Text(tag).font(.caption)
+                        }
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(on ? Color.accentColor.opacity(auto ? 0.15 : 0.28)
+                                       : Color.secondary.opacity(0.12),
+                                    in: Capsule())
+                        .foregroundStyle(on ? Color.accentColor : Color.primary)
+                        .overlay(Capsule().stroke(on ? Color.accentColor.opacity(0.5) : .clear, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(auto)
+                    .help(auto ? "Auto-detected from the name or folder"
+                              : (on ? "Remove tag" : "Add tag"))
+                }
+            }
+            Text("Sparkled tags are detected automatically.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
     }
 }

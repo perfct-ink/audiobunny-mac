@@ -8,7 +8,7 @@ import SwiftUI
 /// pairs, one pair per horizontal pixel. Held as 8-bit values (that's what the
 /// on-disk cache stores — see `WaveformCache`); exposed as −1…1 floats for
 /// drawing.
-struct Waveform: Equatable {
+struct Waveform: Equatable, Sendable {
     var sampleRate: Int
     var samplesPerPixel: Int
     /// Interleaved signed 8-bit min/max, two entries per pixel:
@@ -93,33 +93,30 @@ struct WaveformView: View {
     var playhead: Double? = nil
     /// Called with a 0…1 position while the user scrubs across the waveform.
     var onScrub: ((Double) -> Void)? = nil
+    /// Roughly one envelope point per this many screen points. Larger = coarser
+    /// and faster; the inline list strips use a coarse value so scrolling stays
+    /// smooth.
+    var resolution: CGFloat = 2
 
     var body: some View {
         GeometryReader { geo in
             let width = geo.size.width
             ZStack(alignment: .leading) {
-                Canvas { ctx, size in
+                Canvas(rendersAsynchronously: true) { ctx, size in
                     guard let wf = waveform, wf.pixelCount > 0 else {
                         ctx.stroke(Path { $0.move(to: CGPoint(x: 0, y: size.height / 2))
                                           $0.addLine(to: CGPoint(x: size.width, y: size.height / 2)) },
                                    with: .color(.secondary.opacity(0.4)))
                         return
                     }
-                    let mid = size.height / 2
-                    let half = max(1, mid - 1)
-                    let count = wf.pixelCount
-                    let colWidth = size.width / CGFloat(count)
-                    let playedX = (playhead.map { CGFloat($0) } ?? 0) * size.width
-                    for p in 0..<count {
-                        let (lo, hi) = wf.minMax(at: p)
-                        let x = CGFloat(p) * colWidth
-                        let top = mid - CGFloat(hi) * half
-                        let bottom = mid - CGFloat(lo) * half
-                        let rect = CGRect(x: x, y: min(top, bottom),
-                                          width: max(0.75, colWidth - 0.5),
-                                          height: max(1, abs(bottom - top)))
-                        let played = playhead != nil && x < playedX
-                        ctx.fill(Path(rect), with: .color(played ? .accentColor : .secondary.opacity(0.55)))
+                    // One filled envelope polygon — a single fill call, not one
+                    // per column — so a screen full of these stays cheap to scroll.
+                    let path = Self.envelopePath(wf, in: size, resolution: resolution)
+                    ctx.fill(path, with: .color(.secondary.opacity(0.55)))
+                    if let playhead {
+                        let x = CGFloat(playhead) * size.width
+                        ctx.clip(to: Path(CGRect(x: 0, y: 0, width: x, height: size.height)))
+                        ctx.fill(path, with: .color(.accentColor))
                     }
                 }
                 if let playhead {
@@ -131,12 +128,33 @@ struct WaveformView: View {
             }
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        guard width > 0 else { return }
-                        onScrub?(Double(min(max(value.location.x, 0), width) / width))
-                    }
+                DragGesture(minimumDistance: 0).onChanged { value in
+                    guard let onScrub, width > 0 else { return }
+                    onScrub(Double(min(max(value.location.x, 0), width) / width))
+                }
             )
         }
+    }
+
+    /// max envelope left→right, then min envelope right→left, closed.
+    private static func envelopePath(_ wf: Waveform, in size: CGSize, resolution: CGFloat) -> Path {
+        let mid = size.height / 2
+        let half = max(1, mid - 1)
+        let stride = max(1, Int((CGFloat(wf.pixelCount) * resolution / max(size.width, 1)).rounded()))
+        let indices = Swift.stride(from: 0, to: wf.pixelCount, by: stride).map { $0 } + [wf.pixelCount - 1]
+
+        var path = Path()
+        for (n, p) in indices.enumerated() {
+            let x = CGFloat(p) / CGFloat(max(wf.pixelCount - 1, 1)) * size.width
+            let y = mid - CGFloat(wf.minMax(at: p).max) * half
+            n == 0 ? path.move(to: CGPoint(x: x, y: y)) : path.addLine(to: CGPoint(x: x, y: y))
+        }
+        for p in indices.reversed() {
+            let x = CGFloat(p) / CGFloat(max(wf.pixelCount - 1, 1)) * size.width
+            let y = mid - CGFloat(wf.minMax(at: p).min) * half
+            path.addLine(to: CGPoint(x: x, y: y))
+        }
+        path.closeSubpath()
+        return path
     }
 }
