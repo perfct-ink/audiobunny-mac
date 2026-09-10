@@ -53,4 +53,15 @@ final class SamplePlaybackTests: XCTestCase {
 
         XCTAssertEqual(m.selectedID, a.id)
     }
+
+    func testPlayMarksTheSampleAsHeard() {
+        let m = manager(["a", "b"])
+        let a = m.folders[0].samples[0]
+        let b = m.folders[0].samples[1]
+
+        XCTAssertFalse(m.hasPlayed(a))
+        m.play(a)
+        XCTAssertTrue(m.hasPlayed(a))
+        XCTAssertFalse(m.hasPlayed(b))
+    }
 }

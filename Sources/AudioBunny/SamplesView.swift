@@ -118,6 +118,13 @@ struct SamplesView: View {
                 }
             }
             .listStyle(.inset)
+            .onMoveCommand { direction in
+                switch direction {
+                case .up:   sampleManager.selectPrevious()
+                case .down: sampleManager.selectNext()
+                default:    break
+                }
+            }
         }
     }
 }
@@ -241,6 +248,7 @@ struct SampleRow: View {
 
     private var isPlaying: Bool { sampleManager.currentlyPlayingID == sample.id }
     private var isFavorited: Bool { sampleManager.isFavorited(sample) }
+    private var hasPlayed: Bool { sampleManager.hasPlayed(sample) }
 
     /// Sub-directory of the sample within the scanned folder (e.g. "Drums/808"),
     /// or an abbreviated absolute directory if we don't have the root. Empty when
@@ -271,6 +279,7 @@ struct SampleRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(sample.name)
                     .lineLimit(1)
+                    .foregroundStyle(hasPlayed && !isPlaying ? .secondary : .primary)
                 if !locationText.isEmpty {
                     Text(locationText)
                         .font(.caption2)
@@ -294,6 +303,14 @@ struct SampleRow: View {
             }
 
             Spacer()
+
+            // Show the waveform inline once it's been computed (for the selected
+            // sample, in the bar below) — never triggers a compute from here.
+            if let peaks = sampleManager.waveform(for: sample) {
+                WaveformView(peaks: peaks)
+                    .frame(width: 96, height: 22)
+                    .allowsHitTesting(false)
+            }
 
             if let duration = sampleManager.duration(for: sample) {
                 Text(formatSampleDuration(duration))
@@ -319,6 +336,7 @@ struct SampleRow: View {
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+        .listRowBackground(hasPlayed ? Color.secondary.opacity(0.07) : nil as Color?)
         .contextMenu {
             Button(isFavorited ? "Remove from Favorites" : "Add to Favorites") {
                 sampleManager.toggleFavorite(sample)

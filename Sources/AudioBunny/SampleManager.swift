@@ -53,6 +53,10 @@ class SampleManager: NSObject, ObservableObject {
     /// waveform playhead. 0 when nothing is playing.
     @Published private(set) var playheadFraction: Double = 0
 
+    /// Sample files auditioned this session — the list dims their rows so you
+    /// can see what you've already heard while digging. Not persisted.
+    @Published private(set) var playedURLs: Set<URL> = []
+
     /// Absolute paths of source files the user has favorited (a copy also lives
     /// in `favoritesFolderURL`).
     @Published private(set) var favoritedPaths: Set<String> = []
@@ -68,6 +72,12 @@ class SampleManager: NSObject, ObservableObject {
     private var durationTask: Task<Void, Never>?
     private var playheadTask: Task<Void, Never>?
     private var waveformTask: Task<Void, Never>?
+    private var playbackTask: Task<Void, Never>?
+
+    /// Ferries a non-Sendable value from a background task back to the main
+    /// actor. Safe here: the `AVAudioPlayer` is created on the background task
+    /// and only ever touched again on the main actor.
+    private struct Handoff<T>: @unchecked Sendable { let value: T }
 
     /// - Parameters:
     ///   - userDefaults: injectable for testing; defaults to the app's real defaults.
@@ -179,10 +189,13 @@ class SampleManager: NSObject, ObservableObject {
         if waveforms[url] != nil { return }
         waveformTask?.cancel()
         waveformTask = Task.detached(priority: .utility) { [weak self] in
-            let peaks = computeWaveformPeaks(url: url)   // checks Task.isCancelled internally
-            guard !Task.isCancelled, let peaks else { return }
-            await MainActor.run { self?.waveforms[url] = peaks }
+            guard let peaks = computeWaveformPeaks(url: url), !Task.isCancelled else { return }
+            await self?.storeWaveform(peaks, for: url)
         }
+    }
+
+    private func storeWaveform(_ peaks: [Float], for url: URL) {
+        waveforms[url] = peaks
     }
 
     // MARK: - Seeking / playhead
@@ -233,18 +246,46 @@ class SampleManager: NSObject, ObservableObject {
     /// Starts (or restarts, from the top) playback of `sample`, selecting it and
     /// loading its waveform. This is what a plain selection — single click or the
     /// arrow keys — triggers.
+    ///
+    /// `AVAudioPlayer` creation (file decode / `prepareToPlay`) is done on a
+    /// background task, not the main actor — it can stall for hundreds of ms on
+    /// a large file. A short debounce means holding an arrow key to scrub the
+    /// list only actually loads the sample you settle on.
     func play(_ sample: SoundFile) {
         selectedID = sample.id
+        playedURLs.insert(sample.url)
         loadWaveform(for: sample)
         stop()
-        guard let newPlayer = try? AVAudioPlayer(contentsOf: sample.url) else { return }
-        newPlayer.delegate = self
-        newPlayer.numberOfLoops = isLooping ? -1 : 0
-        player = newPlayer
-        newPlayer.play()
-        currentlyPlayingID = sample.id
-        startPlayheadUpdates()
+
+        let url = sample.url
+        let sampleID = sample.id
+        currentlyPlayingID = sampleID          // optimistic — cleared below if it fails to load
+
+        playbackTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(60))
+            guard !Task.isCancelled else { return }
+
+            let handoff: Handoff<AVAudioPlayer>? = await Task.detached(priority: .userInitiated) {
+                guard let player = try? AVAudioPlayer(contentsOf: url) else { return nil }
+                player.prepareToPlay()
+                return Handoff(value: player)
+            }.value
+
+            guard let self, !Task.isCancelled, self.selectedID == sampleID else { return }
+            guard let newPlayer = handoff?.value else {
+                if self.currentlyPlayingID == sampleID { self.currentlyPlayingID = nil }
+                return
+            }
+            newPlayer.delegate = self
+            newPlayer.numberOfLoops = self.isLooping ? -1 : 0
+            self.player = newPlayer
+            newPlayer.play()
+            self.currentlyPlayingID = sampleID
+            self.startPlayheadUpdates()
+        }
     }
+
+    func hasPlayed(_ sample: SoundFile) -> Bool { playedURLs.contains(sample.url) }
 
     /// Play/stop toggle for the ▶︎/⏹ buttons.
     func togglePlay(_ sample: SoundFile) {
@@ -256,6 +297,8 @@ class SampleManager: NSObject, ObservableObject {
     }
 
     func stop() {
+        playbackTask?.cancel()
+        playbackTask = nil
         player?.stop()
         player = nil
         currentlyPlayingID = nil
