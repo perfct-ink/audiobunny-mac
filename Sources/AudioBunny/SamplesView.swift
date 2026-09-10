@@ -45,6 +45,16 @@ struct SamplesView: View {
                 } label: {
                     Label("Add Folder…", systemImage: "folder.badge.plus")
                 }
+
+                Menu {
+                    Button("Clear Waveform Cache", role: .destructive) {
+                        sampleManager.clearWaveformCache()
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuIndicator(.hidden)
+                .help("More")
             }
 
             if anySamples {
@@ -304,10 +314,10 @@ struct SampleRow: View {
 
             Spacer()
 
-            // Show the waveform inline once it's been computed (for the selected
-            // sample, in the bar below) — never triggers a compute from here.
-            if let peaks = sampleManager.waveform(for: sample) {
-                WaveformView(peaks: peaks)
+            // Show the waveform inline once it's been loaded (cache hit, or
+            // computed for the selected sample) — never triggers a compute here.
+            if let waveform = sampleManager.waveform(for: sample) {
+                WaveformView(waveform: waveform)
                     .frame(width: 96, height: 22)
                     .allowsHitTesting(false)
             }
@@ -402,7 +412,7 @@ struct SampleWaveformBar: View {
             }
 
             WaveformView(
-                peaks: sampleManager.waveform(for: sample) ?? [],
+                waveform: sampleManager.waveform(for: sample),
                 playhead: isPlaying ? sampleManager.playheadFraction : nil,
                 onScrub: { sampleManager.seek(toFraction: $0) }
             )

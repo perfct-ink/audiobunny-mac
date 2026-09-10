@@ -45,9 +45,9 @@ class SampleManager: NSObject, ObservableObject {
     /// Sample length in seconds, filled in lazily in the background after a scan.
     @Published private(set) var durations: [URL: TimeInterval] = [:]
 
-    /// Cached waveform peaks per file (see `computeWaveformPeaks`), computed on
-    /// demand when a sample is selected or played.
-    @Published private(set) var waveforms: [URL: [Float]] = [:]
+    /// Waveform overviews per file, filled from the on-disk `WaveformCache` or
+    /// computed on demand when a sample is selected or played.
+    @Published private(set) var waveforms: [URL: Waveform] = [:]
 
     /// Playback position (0...1) of the currently playing sample, for the
     /// waveform playhead. 0 when nothing is playing.
@@ -178,24 +178,36 @@ class SampleManager: NSObject, ObservableObject {
 
     // MARK: - Waveform
 
-    func waveform(for sample: SoundFile) -> [Float]? { waveforms[sample.url] }
+    func waveform(for sample: SoundFile) -> Waveform? { waveforms[sample.url] }
 
-    /// Computes and caches the waveform for `sample`. The decode/scan runs on a
+    /// Loads the waveform for `sample` — from the persistent `WaveformCache`
+    /// when it's there, otherwise computed and then cached. All of it runs on a
     /// background (`.utility`) task so it never blocks the UI, and a still-running
-    /// computation for a previous selection is cancelled — rapidly arrowing
-    /// through the list only ever finishes the waveform you land on.
+    /// job for a previous selection is cancelled — arrowing quickly through the
+    /// list only ever finishes the one you land on.
     func loadWaveform(for sample: SoundFile) {
         let url = sample.url
         if waveforms[url] != nil { return }
         waveformTask?.cancel()
         waveformTask = Task.detached(priority: .utility) { [weak self] in
-            guard let peaks = computeWaveformPeaks(url: url), !Task.isCancelled else { return }
-            await self?.storeWaveform(peaks, for: url)
+            if let cached = await WaveformCache.shared.load(sourceURL: url) {
+                await self?.storeWaveform(cached, for: url)
+                return
+            }
+            guard let waveform = computeWaveform(url: url) else { return }
+            await WaveformCache.shared.store(waveform, sourceURL: url)
+            await self?.storeWaveform(waveform, for: url)
         }
     }
 
-    private func storeWaveform(_ peaks: [Float], for url: URL) {
-        waveforms[url] = peaks
+    private func storeWaveform(_ waveform: Waveform, for url: URL) {
+        waveforms[url] = waveform
+    }
+
+    /// Removes every persisted waveform. The in-memory copies stay until the
+    /// tab is next rebuilt.
+    func clearWaveformCache() {
+        Task { await WaveformCache.shared.clear() }
     }
 
     // MARK: - Seeking / playhead

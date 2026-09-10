@@ -4,36 +4,65 @@ import AVFoundation
 
 final class SampleWaveformTests: XCTestCase {
 
-    func testNormalizeScalesLoudestToOne() {
-        XCTAssertEqual(normalizeWaveformPeaks([0.1, 0.25, 0.5]), [0.2, 0.5, 1.0])
-    }
+    // MARK: - computeWaveform
 
-    func testNormalizeLeavesSilenceAlone() {
-        XCTAssertEqual(normalizeWaveformPeaks([0, 0, 0]), [0, 0, 0])
-    }
-
-    func testNormalizeClampsAboveOne() {
-        // Shouldn't happen from real audio, but must never exceed 1.
-        XCTAssertEqual(normalizeWaveformPeaks([2, 1]).max()!, 1.0, accuracy: 0.0001)
-    }
-
-    func testComputeWaveformPeaksOnARealFile() throws {
+    func testComputeWaveformOnARealTone() throws {
         let url = try writeSineWave(seconds: 1.0, amplitude: 0.8)
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let peaks = try XCTUnwrap(computeWaveformPeaks(url: url, buckets: 100))
-        XCTAssertEqual(peaks.count, 100)
-        XCTAssertTrue(peaks.allSatisfy { $0 >= 0 && $0 <= 1 })
-        // A steady tone fills every bucket; the loudest is normalised to 1.
-        XCTAssertEqual(peaks.max()!, 1.0, accuracy: 0.001)
-        XCTAssertGreaterThan(peaks.min()!, 0.5)
+        let wf = try XCTUnwrap(computeWaveform(url: url, targetPixels: 100))
+        XCTAssertEqual(wf.pixelCount, 100, accuracy: 2)   // rounding at the tail
+        XCTAssertEqual(wf.sampleRate, 44_100)
+        XCTAssertGreaterThan(wf.samplesPerPixel, 1)
+
+        for p in 0..<wf.pixelCount {
+            let (lo, hi) = wf.minMax(at: p)
+            XCTAssertGreaterThanOrEqual(lo, -1.0001)
+            XCTAssertLessThanOrEqual(hi, 1.0001)
+            XCTAssertLessThanOrEqual(lo, hi)
+        }
+        // A steady 0.8 tone: every pixel swings roughly ±0.8.
+        let peak = (0..<wf.pixelCount).map { abs(wf.minMax(at: $0).max) }.max()!
+        XCTAssertEqual(peak, 0.8, accuracy: 0.1)
     }
 
-    func testComputeWaveformPeaksReturnsNilForMissingFile() {
-        XCTAssertNil(computeWaveformPeaks(url: URL(fileURLWithPath: "/no/such/sound.wav")))
+    func testComputeWaveformReturnsNilForMissingFile() {
+        XCTAssertNil(computeWaveform(url: URL(fileURLWithPath: "/no/such/sound.wav")))
+    }
+
+    // MARK: - BBC audiowaveform .dat encoding
+
+    func testEncodeProducesAConformantV2Header() {
+        let wf = Waveform(sampleRate: 44_100, samplesPerPixel: 256,
+                          samples: [-40, 60, -128 + 1, 127])   // 2 pixels
+        let data = AudioWaveformData.encode(wf)
+
+        XCTAssertEqual(data.count, 24 + 4)
+        XCTAssertEqual([UInt8](data[0..<4]), [2, 0, 0, 0])        // int32 version = 2, LE
+        XCTAssertEqual([UInt8](data[4..<8]), [1, 0, 0, 0])        // flags: 8-bit
+        XCTAssertEqual(le32(data, 8), 44_100)                     // sample_rate
+        XCTAssertEqual(le32(data, 12), 256)                       // samples_per_pixel
+        XCTAssertEqual(le32(data, 16), 2)                         // length (pairs)
+        XCTAssertEqual(le32(data, 20), 1)                         // channels
+    }
+
+    func testEncodeDecodeRoundTrips() {
+        let original = Waveform(sampleRate: 48_000, samplesPerPixel: 512,
+                                samples: (0..<480).map { Int8(truncatingIfNeeded: $0 - 60) })
+        let restored = AudioWaveformData.decode(AudioWaveformData.encode(original))
+        XCTAssertEqual(restored, original)
+    }
+
+    func testDecodeRejectsGarbage() {
+        XCTAssertNil(AudioWaveformData.decode(Data([1, 2, 3])))
+        XCTAssertNil(AudioWaveformData.decode(Data(count: 24)))   // version 0
     }
 
     // MARK: - helpers
+
+    private func le32(_ data: Data, _ offset: Int) -> Int {
+        (0..<4).reduce(0) { $0 | (Int(data[data.startIndex + offset + $1]) << (8 * $1)) }
+    }
 
     private func writeSineWave(seconds: Double, amplitude: Float) throws -> URL {
         let sampleRate = 44_100.0
