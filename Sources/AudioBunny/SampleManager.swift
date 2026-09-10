@@ -67,7 +67,7 @@ class SampleManager: NSObject, ObservableObject {
     private var player: AVAudioPlayer?
     private var durationTask: Task<Void, Never>?
     private var playheadTask: Task<Void, Never>?
-    private var waveformTasks: Set<URL> = []
+    private var waveformTask: Task<Void, Never>?
 
     /// - Parameters:
     ///   - userDefaults: injectable for testing; defaults to the app's real defaults.
@@ -170,19 +170,18 @@ class SampleManager: NSObject, ObservableObject {
 
     func waveform(for sample: SoundFile) -> [Float]? { waveforms[sample.url] }
 
-    /// Computes and caches the waveform for `sample` (once). Safe to call on
-    /// every selection change / play.
+    /// Computes and caches the waveform for `sample`. The decode/scan runs on a
+    /// background (`.utility`) task so it never blocks the UI, and a still-running
+    /// computation for a previous selection is cancelled — rapidly arrowing
+    /// through the list only ever finishes the waveform you land on.
     func loadWaveform(for sample: SoundFile) {
         let url = sample.url
-        guard waveforms[url] == nil, !waveformTasks.contains(url) else { return }
-        waveformTasks.insert(url)
-        Task { [weak self] in
-            let peaks = await Task.detached(priority: .userInitiated) {
-                computeWaveformPeaks(url: url)
-            }.value
-            guard let self else { return }
-            self.waveformTasks.remove(url)
-            if let peaks { self.waveforms[url] = peaks }
+        if waveforms[url] != nil { return }
+        waveformTask?.cancel()
+        waveformTask = Task.detached(priority: .utility) { [weak self] in
+            let peaks = computeWaveformPeaks(url: url)   // checks Task.isCancelled internally
+            guard !Task.isCancelled, let peaks else { return }
+            await MainActor.run { self?.waveforms[url] = peaks }
         }
     }
 
@@ -226,13 +225,17 @@ class SampleManager: NSObject, ObservableObject {
 
     // MARK: - Playback
 
-    func togglePlay(_ sample: SoundFile) {
+    func sample(withID id: UUID?) -> SoundFile? {
+        guard let id else { return nil }
+        return folders.lazy.flatMap(\.samples).first { $0.id == id }
+    }
+
+    /// Starts (or restarts, from the top) playback of `sample`, selecting it and
+    /// loading its waveform. This is what a plain selection — single click or the
+    /// arrow keys — triggers.
+    func play(_ sample: SoundFile) {
         selectedID = sample.id
         loadWaveform(for: sample)
-        if currentlyPlayingID == sample.id {
-            stop()
-            return
-        }
         stop()
         guard let newPlayer = try? AVAudioPlayer(contentsOf: sample.url) else { return }
         newPlayer.delegate = self
@@ -241,6 +244,15 @@ class SampleManager: NSObject, ObservableObject {
         newPlayer.play()
         currentlyPlayingID = sample.id
         startPlayheadUpdates()
+    }
+
+    /// Play/stop toggle for the ▶︎/⏹ buttons.
+    func togglePlay(_ sample: SoundFile) {
+        if currentlyPlayingID == sample.id {
+            stop()
+        } else {
+            play(sample)
+        }
     }
 
     func stop() {

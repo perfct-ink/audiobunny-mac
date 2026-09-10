@@ -59,6 +59,12 @@ struct SamplesView: View {
                 SampleWaveformBar(sample: sample)
             }
         }
+        .onChange(of: sampleManager.selectedID) { id in
+            // Selecting a sample — a click or the arrow keys — plays it.
+            guard let sample = sampleManager.sample(withID: id),
+                  id != sampleManager.currentlyPlayingID else { return }
+            sampleManager.play(sample)
+        }
         .fileImporter(
             isPresented: $showFolderPicker,
             allowedContentTypes: [.folder],
@@ -353,6 +359,16 @@ struct SampleWaveformBar: View {
                         .foregroundStyle(isPlaying ? Color.accentColor : .secondary)
                 }
                 .buttonStyle(.plain)
+
+                Button {
+                    sampleManager.isLooping.toggle()
+                } label: {
+                    Image(systemName: "repeat")
+                        .font(.callout)
+                        .foregroundStyle(sampleManager.isLooping ? Color.accentColor : .secondary)
+                }
+                .buttonStyle(.plain)
+                .help(sampleManager.isLooping ? "Looping — click to turn off" : "Loop the sample")
 
                 Text(sample.name)
                     .font(.callout)

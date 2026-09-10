@@ -20,6 +20,9 @@ func computeWaveformPeaks(url: URL, buckets: Int = 480) -> [Float]? {
     var framesRead: AVAudioFramePosition = 0
 
     while framesRead < totalFrames {
+        // Bail out early if a newer selection has superseded this computation
+        // (see SampleManager.loadWaveform, which cancels the prior task).
+        if Task.isCancelled { return nil }
         guard (try? file.read(into: buffer)) != nil,
               buffer.frameLength > 0,
               let channels = buffer.floatChannelData else { break }
