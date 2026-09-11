@@ -460,33 +460,38 @@ class PluginManager: ObservableObject {
         plugins = plugins
     }
 
+    /// Validates an Audio Unit via Apple's `auval` command-line tool, run as a
+    /// separate process — never by loading the AU's code in this app.
+    /// `AVAudioUnit.instantiate` used to do exactly that in-process, and a
+    /// broken AU's crash on load (EXC_BAD_ACCESS) took AudioBunny down with it
+    /// mid-"Test All" sweep. `auval` can still crash or hang on a bad plugin,
+    /// but as its own process that only fails the one test — never the host
+    /// app — and `runProcessWithTimeout` force-kills it if it hangs. Mirrors
+    /// `testVSTBundle`'s out-of-process approach below.
     private func testAudioUnit(_ plugin: AudioPlugin) async {
         guard let desc = plugin.audioComponentDescription else {
             plugin.status = .failed("No component description")
             return
         }
+        let type = auCodeString(desc.componentType)
+        let subtype = auCodeString(desc.componentSubType)
+        let manufacturer = auCodeString(desc.componentManufacturer)
 
-        // `AVAudioUnit.instantiate` loads the plugin's code; a broken or very
-        // slow AU can leave the callback pending indefinitely, which would stall
-        // a whole "Test All" sweep. Bound it so the sweep keeps moving.
-        let outcome = await withTimeout(seconds: 12) {
-            await withCheckedContinuation { (continuation: CheckedContinuation<PluginStatus, Never>) in
-                AVAudioUnit.instantiate(with: desc, options: []) { avAudioUnit, error in
-                    if let error {
-                        continuation.resume(returning: .failed(error.localizedDescription))
-                    } else if avAudioUnit != nil {
-                        continuation.resume(returning: .active)
-                    } else {
-                        continuation.resume(returning: .failed("Could not instantiate"))
-                    }
-                }
+        let status: PluginStatus = await Task.detached(priority: .userInitiated) {
+            guard let data = runProcessWithTimeout(
+                executable: "/usr/bin/auval",
+                arguments: ["-v", type, subtype, manufacturer],
+                timeoutSeconds: 12
+            ) else {
+                return .failed("Timed out")
             }
-        }
+            let output = String(data: data, encoding: .utf8) ?? ""
+            return output.contains("AU VALIDATION SUCCEEDED")
+                ? .active
+                : .failed("Failed auval validation")
+        }.value
 
-        switch outcome {
-        case .completed(let status): plugin.status = status
-        case .timedOut: plugin.status = .failed("Timed out")
-        }
+        plugin.status = status
     }
 
     /// Inspects a VST bundle's symbol table for its entry point. The `nm`

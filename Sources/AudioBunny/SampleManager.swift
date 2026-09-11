@@ -87,6 +87,7 @@ class SampleManager: NSObject, ObservableObject {
     private var waveformTask: Task<Void, Never>?
     private var playbackTask: Task<Void, Never>?
     private var prewarmTask: Task<Void, Never>?
+    private var autoPlayTask: Task<Void, Never>?
 
     /// Auto-tags per sample, computed once per scan instead of per render.
     private var autoTagsByURL: [URL: Set<String>] = [:]
@@ -333,6 +334,22 @@ class SampleManager: NSObject, ObservableObject {
         return folders.lazy.flatMap(\.samples).first { $0.id == id }
     }
 
+    /// Called whenever `selectedID` changes via a click or the arrow keys.
+    /// Moving the selection itself is instant — the row highlight updates the
+    /// moment `selectedID` is set — but this defers actually loading/playing
+    /// the newly-selected sample for a beat, so holding an arrow key to skim
+    /// the list only ever loads the one you settle on rather than tearing down
+    /// and re-creating a player (plus re-triggering waveform loads) for every
+    /// sample flown past.
+    func scheduleAutoPlay(for sample: SoundFile) {
+        autoPlayTask?.cancel()
+        autoPlayTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard let self, !Task.isCancelled, self.selectedID == sample.id else { return }
+            self.play(sample)
+        }
+    }
+
     /// Starts (or restarts, from the top) playback of `sample`, selecting it and
     /// loading its waveform. This is what a plain selection — single click or the
     /// arrow keys — triggers.
@@ -387,6 +404,8 @@ class SampleManager: NSObject, ObservableObject {
     }
 
     func stop() {
+        autoPlayTask?.cancel()
+        autoPlayTask = nil
         playbackTask?.cancel()
         playbackTask = nil
         if let current = player {

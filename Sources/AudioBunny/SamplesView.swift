@@ -72,17 +72,26 @@ struct SamplesView: View {
             }
         }
         .background {
-            // Spacebar stops playback (there are no text fields on this tab).
-            Button("", action: sampleManager.stop)
-                .keyboardShortcut(.space, modifiers: [])
-                .opacity(0)
-                .accessibilityHidden(true)
+            // Spacebar toggles play/pause on the selected sample (there are no
+            // text fields on this tab).
+            Button("") {
+                if let sample = selectedSample {
+                    sampleManager.togglePlay(sample)
+                } else {
+                    sampleManager.stop()
+                }
+            }
+            .keyboardShortcut(.space, modifiers: [])
+            .opacity(0)
+            .accessibilityHidden(true)
         }
         .onChange(of: sampleManager.selectedID) { id in
-            // Selecting a sample — a click or the arrow keys — plays it.
+            // Selecting a sample — a click or the arrow keys — plays it, after
+            // a short debounce (see `scheduleAutoPlay`) so the selection/
+            // highlight itself never waits on loading.
             guard let sample = sampleManager.sample(withID: id),
                   id != sampleManager.currentlyPlayingID else { return }
-            sampleManager.play(sample)
+            sampleManager.scheduleAutoPlay(for: sample)
         }
         .fileImporter(
             isPresented: $showFolderPicker,
