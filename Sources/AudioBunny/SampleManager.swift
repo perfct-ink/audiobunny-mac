@@ -77,6 +77,11 @@ class SampleManager: NSObject, ObservableObject {
     /// path → user-assigned tags (on top of the auto-detected ones).
     @Published private(set) var manualTagsByPath: [String: Set<String>] = [:]
 
+    /// Files whose tags couldn't be written to disk as Finder Tags this session
+    /// (read-only volume, network share, …) — they still work fully in
+    /// AudioBunny, this just surfaces that the file itself wasn't updated.
+    @Published private(set) var finderTagSyncErrorCount = 0
+
     private let savedPathsKey = "audiobunny.sampleFolderPaths"
     private let favoritesKey = "audiobunny.sampleFavorites"
     private let tagsKey = "audiobunny.sampleManualTags"
@@ -88,6 +93,7 @@ class SampleManager: NSObject, ObservableObject {
     private var playbackTask: Task<Void, Never>?
     private var prewarmTask: Task<Void, Never>?
     private var autoPlayTask: Task<Void, Never>?
+    private var finderTagSyncTask: Task<Void, Never>?
 
     /// Auto-tags per sample, computed once per scan instead of per render.
     private var autoTagsByURL: [URL: Set<String>] = [:]
@@ -131,6 +137,7 @@ class SampleManager: NSObject, ObservableObject {
         persistFolders()
         rebuildTagIndex()
         prewarmWaveforms()
+        finderTagSyncTask?.cancel()
     }
 
     func rescan(folderID: UUID) {
@@ -147,6 +154,14 @@ class SampleManager: NSObject, ObservableObject {
         userDefaults.set(folders.map { $0.url.path }, forKey: savedPathsKey)
     }
 
+    private struct ScanResult: Sendable {
+        var samples: [SoundFile]
+        /// Vocabulary Finder Tags already present on disk for each file — read
+        /// during the same enumeration pass (the keys are prefetched, so this is
+        /// free), used to hydrate `manualTagsByPath` below.
+        var existingVocabTagsByURL: [URL: Set<String>]
+    }
+
     private func scan(folderID: UUID) async {
         guard let idx = folders.firstIndex(where: { $0.id == folderID }) else { return }
         let url = folders[idx].url
@@ -154,30 +169,54 @@ class SampleManager: NSObject, ObservableObject {
 
         // Filesystem enumeration is synchronous and can take a moment for large
         // sample libraries; run it off the main actor so the UI stays responsive.
-        let found: [SoundFile] = await Task.detached(priority: .userInitiated) {
-            var results: [SoundFile] = []
+        let result: ScanResult = await Task.detached(priority: .userInitiated) {
+            var samples: [SoundFile] = []
+            var tagsByURL: [URL: Set<String>] = [:]
             let accessing = url.startAccessingSecurityScopedResource()
             defer { if accessing { url.stopAccessingSecurityScopedResource() } }
             guard let enumerator = FileManager.default.enumerator(
                 at: url,
-                includingPropertiesForKeys: [.isRegularFileKey],
+                includingPropertiesForKeys: [.isRegularFileKey, .tagNamesKey],
                 options: [.skipsHiddenFiles]
-            ) else { return results }
+            ) else { return ScanResult(samples: samples, existingVocabTagsByURL: tagsByURL) }
             for case let fileURL as URL in enumerator {
-                if soundFileExtensions.contains(fileURL.pathExtension.lowercased()) {
-                    results.append(SoundFile(url: fileURL))
-                }
+                guard soundFileExtensions.contains(fileURL.pathExtension.lowercased()) else { continue }
+                samples.append(SoundFile(url: fileURL))
+                let vocab = vocabularyFinderTags(at: fileURL)
+                if !vocab.isEmpty { tagsByURL[fileURL] = vocab }
             }
-            return results
+            return ScanResult(samples: samples, existingVocabTagsByURL: tagsByURL)
         }.value
 
         guard let idx2 = folders.firstIndex(where: { $0.id == folderID }) else { return }
-        folders[idx2].samples = found.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        folders[idx2].samples = result.samples.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         folders[idx2].isScanning = false
 
+        hydrateManualTags(from: result.existingVocabTagsByURL)
         rebuildTagIndex()
         scheduleDurationLoading()
         prewarmWaveforms()
+        syncAllFinderTags()
+    }
+
+    /// Absorbs vocabulary Finder Tags already on disk (set by a previous run,
+    /// by hand in Finder, or synced in from another Mac) into the manual-tag
+    /// store, so they aren't lost and don't cause a redundant write later.
+    private func hydrateManualTags(from tagsByURL: [URL: Set<String>]) {
+        guard !tagsByURL.isEmpty else { return }
+        var changed = false
+        for (fileURL, fileTags) in tagsByURL {
+            let auto = autoTags(forFileName: fileURL.deletingPathExtension().lastPathComponent,
+                                parentFolderName: fileURL.deletingLastPathComponent().lastPathComponent)
+            let extra = fileTags.subtracting(auto)
+            guard !extra.isEmpty else { continue }
+            let path = fileURL.path
+            var set = manualTagsByPath[path] ?? []
+            let before = set
+            set.formUnion(extra)
+            if set != before { manualTagsByPath[path] = set; changed = true }
+        }
+        if changed { persistTags() }
     }
 
     // MARK: - Duration (loaded one file at a time in the background)
@@ -485,6 +524,7 @@ class SampleManager: NSObject, ObservableObject {
         manualTagsByPath[sample.url.path] = set.isEmpty ? nil : set
         persistTags()
         refreshAvailableTags()
+        Task { await syncFinderTagsNow(for: sample, priority: .utility) }
     }
 
     func toggleTagFilter(_ tag: String) {
@@ -523,6 +563,48 @@ class SampleManager: NSObject, ObservableObject {
     private func persistTags() {
         let encodable = manualTagsByPath.mapValues { Array($0).sorted() }
         userDefaults.set(try? JSONEncoder().encode(encodable), forKey: tagsKey)
+    }
+
+    // MARK: - Finder Tags sync (mirrors auto + manual tags onto the file itself)
+
+    /// Writes every sample's current tag set (auto + manual) onto its file as
+    /// Finder Tags, one file at a time at background priority. A file whose
+    /// Finder Tags already match is skipped (no-op), so a rescan only ever
+    /// writes what actually changed. Foreign Finder Tags the user already had
+    /// on a file (anything outside our vocabulary) are always preserved.
+    private func syncAllFinderTags() {
+        finderTagSyncTask?.cancel()
+        let samples = folders.flatMap(\.samples)
+        guard !samples.isEmpty else { return }
+        finderTagSyncTask = Task { [weak self] in
+            for sample in samples {
+                if Task.isCancelled { return }
+                guard let self else { return }
+                await self.syncFinderTagsNow(for: sample, priority: .background)
+            }
+        }
+    }
+
+    /// Syncs a single sample's tags to disk right away — used for the write-
+    /// through when the user changes a tag by hand, and by `syncAllFinderTags`
+    /// for the full-library pass after a scan.
+    private func syncFinderTagsNow(for sample: SoundFile, priority: TaskPriority) async {
+        let desired = allTags(for: sample)
+        let url = sample.url
+        let failed = await Task.detached(priority: priority) { () -> Bool in
+            do {
+                _ = try syncFinderTags(desired: desired, at: url)
+                return false
+            } catch {
+                return true
+            }
+        }.value
+        if failed { finderTagSyncErrorCount += 1 }
+    }
+
+    /// Clears the "couldn't write tags to N files" banner.
+    func dismissFinderTagSyncErrors() {
+        finderTagSyncErrorCount = 0
     }
 
     private static func decodeTags(_ data: Data?) -> [String: Set<String>] {

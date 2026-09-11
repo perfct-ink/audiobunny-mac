@@ -43,6 +43,43 @@ final class SampleScanIntegrationTests: XCTestCase {
         XCTAssertEqual(Set(m.availableTags), ["Kick", "HiHat"])
     }
 
+    func testScanHydratesManualTagsFromExistingFinderTags() async throws {
+        // "Glitch" isn't derivable from either filename — simulates a tag set
+        // by hand in Finder, or synced in from another Mac, before this scan.
+        let kickURL = folder.appendingPathComponent("Trap Kick.wav")
+        try (kickURL as NSURL).setResourceValue(["Glitch"], forKey: .tagNamesKey)
+
+        let m = SampleManager(userDefaults: defaults, autoRescanOnLaunch: false)
+        m.addFolder(folder)
+        await waitUntil { m.folders.first?.samples.count == 2 }
+
+        let sample = try XCTUnwrap(m.folders.first!.samples.first { $0.name == "Trap Kick" })
+        XCTAssertEqual(Set(m.tags(for: sample)), ["Kick", "Glitch"])
+    }
+
+    func testScanWritesAutoTagsBackToFinderTags() async throws {
+        let kickURL = folder.appendingPathComponent("Trap Kick.wav")
+        let m = SampleManager(userDefaults: defaults, autoRescanOnLaunch: false)
+        m.addFolder(folder)
+        await waitUntil { m.folders.first?.samples.count == 2 }
+
+        await waitUntil(5) { vocabularyFinderTags(at: kickURL).contains("Kick") }
+        XCTAssertEqual(vocabularyFinderTags(at: kickURL), ["Kick"])
+    }
+
+    func testToggleTagWritesThroughToFinderTags() async throws {
+        let hihatURL = folder.appendingPathComponent("Closed HiHat.wav")
+        let m = SampleManager(userDefaults: defaults, autoRescanOnLaunch: false)
+        m.addFolder(folder)
+        await waitUntil { m.folders.first?.samples.count == 2 }
+        let sample = try XCTUnwrap(m.folders.first!.samples.first { $0.name == "Closed HiHat" })
+
+        m.toggleTag("Glitch", for: sample)
+
+        await waitUntil(5) { vocabularyFinderTags(at: hihatURL).contains("Glitch") }
+        XCTAssertEqual(vocabularyFinderTags(at: hihatURL), ["Glitch", "HiHat"])
+    }
+
     func testPrewarmFillsWaveformsInTheBackground() async {
         let m = SampleManager(userDefaults: defaults, autoRescanOnLaunch: false)
         m.addFolder(folder)

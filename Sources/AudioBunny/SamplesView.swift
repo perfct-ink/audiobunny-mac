@@ -56,6 +56,11 @@ struct SamplesView: View {
                 .help("More")
             }
 
+            if sampleManager.finderTagSyncErrorCount > 0 {
+                FinderTagSyncErrorBanner()
+                Divider()
+            }
+
             if anySamples {
                 SampleTagFilterBar()
                 Divider()
@@ -156,6 +161,30 @@ struct SamplesView: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Finder Tag sync error banner
+
+struct FinderTagSyncErrorBanner: View {
+    @EnvironmentObject var sampleManager: SampleManager
+
+    var body: some View {
+        let count = sampleManager.finderTagSyncErrorCount
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text("Couldn't save tags to the file on disk for \(count) sample\(count == 1 ? "" : "s") — probably a read-only or network volume. Tags still work fully in AudioBunny.")
+                .font(.caption)
+            Spacer()
+            Button("Dismiss") { sampleManager.dismissFinderTagSyncErrors() }
+                .font(.caption)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(Color.orange.opacity(0.12))
     }
 }
 
@@ -481,7 +510,7 @@ struct SampleInspector: View {
                               : (on ? "Remove tag" : "Add tag"))
                 }
             }
-            Text("Sparkled tags are detected automatically.")
+            Text("Sparkled tags are detected automatically. Tags are also saved as Finder Tags on the file, so Finder and Spotlight see them too.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }

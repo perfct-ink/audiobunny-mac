@@ -10,6 +10,8 @@ let sampleTagVocabulary: [String] = [
     "Vocal", "Glitch", "Pads", "Stabs",
 ]
 
+let sampleTagVocabularySet = Set(sampleTagVocabulary)
+
 /// Words/spellings that should map onto a canonical tag but wouldn't match by a
 /// plain substring test (e.g. "hi-hat" → "HiHat", "vox" → "Vocal").
 private let tagAliases: [String: String] = [
@@ -59,6 +61,34 @@ private func normalizeForTagMatch(_ s: String) -> String {
         }
     }
     return " \(out.trimmingCharacters(in: .whitespaces)) "
+}
+
+// MARK: - Finder Tags (the file's own metadata, not just AudioBunny's cache)
+
+/// The subset of `url`'s Finder Tags that belong to our vocabulary. Reading is
+/// just a resource-value fetch (no file content read), safe to call often.
+func vocabularyFinderTags(at url: URL) -> Set<String> {
+    let names = (try? url.resourceValues(forKeys: [.tagNamesKey]).tagNames) ?? []
+    return Set(names).intersection(sampleTagVocabularySet)
+}
+
+/// Merges `desired` into `url`'s Finder Tags, preserving any tag outside our
+/// vocabulary (the user's own Finder tags on that file are never touched).
+/// A no-op — returns `false`, doesn't write — when the file's vocabulary tags
+/// already match. Throws if the write itself fails, e.g. a read-only or
+/// network volume.
+@discardableResult
+func syncFinderTags(desired: Set<String>, at url: URL) throws -> Bool {
+    let existingAll = Set((try? url.resourceValues(forKeys: [.tagNamesKey]).tagNames) ?? [])
+    let existingVocab = existingAll.intersection(sampleTagVocabularySet)
+    guard existingVocab != desired else { return false }
+
+    let foreign = existingAll.subtracting(sampleTagVocabularySet)
+    // NSURL's untyped setter, not URLResourceValues.tagNames — the typed
+    // property's setter is gated to a newer OS on some SDKs, but this one
+    // (the mechanism Finder itself has used since Mavericks) is not.
+    try (url as NSURL).setResourceValue(Array(foreign.union(desired)).sorted(), forKey: .tagNamesKey)
+    return true
 }
 
 // MARK: - Duration formatting
