@@ -63,4 +63,29 @@ final class PluginIdentityTests: XCTestCase {
                             version: "1.0")
         XCTAssertEqual(p.identityKey, "VST 3:/Library/Audio/Plug-Ins/VST3/Serum.vst3")
     }
+
+    // MARK: canOpen ("Open Plugin" — AU only, and never for a disabled plugin)
+
+    func testCanOpenIsTrueForAudioUnitsRegardlessOfTestStatus() {
+        for status: PluginStatus in [.untested, .active, .failed("x"), .timedOut, .testing] {
+            let p = au(name: "FM8")
+            p.status = status
+            XCTAssertTrue(p.canOpen, "status \(status) should still allow opening the AU")
+        }
+    }
+
+    func testCanOpenIsFalseForDisabledAudioUnits() {
+        let p = au(name: "FM8")
+        p.status = .disabled
+        XCTAssertFalse(p.canOpen)
+    }
+
+    func testCanOpenIsFalseForVSTFormats() {
+        let vst2 = AudioPlugin(name: "Serum", manufacturer: "Xfer", type: .vst2,
+                               fileURL: URL(fileURLWithPath: "/tmp/Serum.vst"), version: "1.0")
+        let vst3 = AudioPlugin(name: "Serum", manufacturer: "Xfer", type: .vst3,
+                               fileURL: URL(fileURLWithPath: "/tmp/Serum.vst3"), version: "1.0")
+        XCTAssertFalse(vst2.canOpen)
+        XCTAssertFalse(vst3.canOpen)
+    }
 }

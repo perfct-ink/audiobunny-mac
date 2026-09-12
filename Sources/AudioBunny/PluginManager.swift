@@ -530,6 +530,31 @@ class PluginManager: ObservableObject {
         plugin.status = status
     }
 
+    // MARK: - Open Plugin (look at it yourself, no audio graph attached)
+
+    /// Set when `openPlugin` fails, for the UI to surface — cleared by
+    /// whatever reads it (see `PluginDetailView`).
+    @Published var openPluginError: String?
+
+    /// `auval` is occasionally wrong — a real plugin that works fine in a DAW
+    /// can still fail or time out validation. This instantiates the AU with no
+    /// `AVAudioEngine`, no input/output busses, nothing rendering — just its
+    /// own UI in a window — so you can judge a plugin yourself instead of
+    /// trusting the automated verdict alone.
+    func openPlugin(_ plugin: AudioPlugin) {
+        guard plugin.canOpen else {
+            openPluginError = "Opening a plugin's UI is only supported for Audio Units right now."
+            return
+        }
+        guard let desc = plugin.audioComponentDescription else {
+            openPluginError = "No component description for \(plugin.name)."
+            return
+        }
+        AudioUnitPreviewWindowController.present(desc, pluginName: plugin.name) { [weak self] message in
+            self?.openPluginError = message
+        }
+    }
+
     // MARK: - Disable / Enable
 
     func disableAllFailing() {

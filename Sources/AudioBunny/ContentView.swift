@@ -720,6 +720,15 @@ struct PluginDetailView: View {
                                 .scaleEffect(0.8)
                         }
 
+                        Button(action: { manager.openPlugin(plugin) }) {
+                            Label("Open Plugin", systemImage: "macwindow")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!plugin.canOpen)
+                        .help(plugin.type == .audioUnit
+                              ? "Open the plugin's own UI with no audio engine attached — useful when auval's verdict seems wrong"
+                              : "Opening a plugin's UI is only supported for Audio Units right now")
+
                         if plugin.isDisabled {
                             Button(action: { manager.enablePlugin(plugin) }) {
                                 Label("Re-enable", systemImage: "checkmark.circle")
@@ -798,6 +807,18 @@ struct PluginDetailView: View {
                 Spacer()
             }
             .padding()
+        }
+        .alert(
+            "Couldn't Open Plugin",
+            isPresented: Binding(
+                get: { manager.openPluginError != nil },
+                set: { if !$0 { manager.openPluginError = nil } }
+            ),
+            presenting: manager.openPluginError
+        ) { _ in
+            Button("OK") { manager.openPluginError = nil }
+        } message: { message in
+            Text(message)
         }
     }
 

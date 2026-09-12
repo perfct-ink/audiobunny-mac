@@ -90,4 +90,15 @@ final class PluginTimeoutStatusTests: XCTestCase {
         let key = manager.testHistoryKey(for: p)!
         XCTAssertNil(manager.loadTestHistory()[key], "a timeout must not be remembered as a verdict across launches")
     }
+
+    // MARK: Open Plugin — defensive path for a format the UI already disables the button for
+
+    func testOpenPluginReportsAClearErrorForNonAudioUnitFormats() {
+        let vst = plugin("Serum", status: .untested) // helper fixture is .vst3
+        XCTAssertNil(manager.openPluginError)
+
+        manager.openPlugin(vst)
+
+        XCTAssertEqual(manager.openPluginError, "Opening a plugin's UI is only supported for Audio Units right now.")
+    }
 }

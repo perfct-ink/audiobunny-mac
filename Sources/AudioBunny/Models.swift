@@ -92,6 +92,13 @@ class AudioPlugin: ObservableObject, Identifiable, Hashable, @unchecked Sendable
     var isDisabled: Bool { status == .disabled }
     var canTest: Bool { status != .testing && status != .disabled }
 
+    /// "Open Plugin" — instantiates it with no audio graph attached and shows
+    /// its UI, so you can eyeball a plugin `auval` won't clear (or times out
+    /// on) instead of trusting the automated verdict alone. AU-only for now:
+    /// there's no safe way to host an arbitrary VST2/VST3's UI without a real
+    /// plugin-hosting engine.
+    var canOpen: Bool { type == .audioUnit && status != .disabled }
+
     var subtypeString: String? {
         guard let desc = audioComponentDescription else { return nil }
         return fourCCToString(desc.componentSubType)
