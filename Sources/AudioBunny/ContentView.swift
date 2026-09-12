@@ -421,6 +421,7 @@ struct StatsBar: View {
         HStack(spacing: 16) {
             statItem(counts.active, label: "Active", color: .green)
             statItem(counts.failed, label: "Failed", color: .red)
+            statItem(counts.timedOut, label: "Timed Out", color: .yellow)
             statItem(counts.disabled, label: "Disabled", color: .secondary)
             statItem(counts.untested, label: "Untested", color: .orange)
             Spacer()
@@ -611,6 +612,7 @@ struct StatusBadge: View {
         case .testing: return "..."
         case .active: return "OK"
         case .failed: return "FAIL"
+        case .timedOut: return "TIMEOUT"
         case .disabled: return "OFF"
         }
     }
@@ -621,6 +623,7 @@ struct StatusBadge: View {
         case .testing: return .orange
         case .active: return .green
         case .failed: return .red
+        case .timedOut: return .yellow
         case .disabled: return .gray
         }
     }
@@ -646,6 +649,9 @@ struct PluginStatusIcon: View {
             case .failed:
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.red)
+            case .timedOut:
+                Image(systemName: "clock.badge.exclamationmark.fill")
+                    .foregroundStyle(.yellow)
             case .disabled:
                 Image(systemName: "minus.circle.fill")
                     .foregroundStyle(.gray)
@@ -744,6 +750,15 @@ struct PluginDetailView: View {
                     }
                     .padding()
                     .background(Color.red.opacity(0.1))
+                    .cornerRadius(8)
+                } else if plugin.status == .timedOut {
+                    HStack {
+                        Image(systemName: "clock.badge.exclamationmark.fill")
+                            .foregroundStyle(.yellow)
+                        Text("Validation didn't finish in time — that's not a verdict, the plugin may well be fine. Try testing it again.")
+                    }
+                    .padding()
+                    .background(Color.yellow.opacity(0.15))
                     .cornerRadius(8)
                 }
 

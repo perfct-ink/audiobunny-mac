@@ -18,6 +18,7 @@ class PluginManager: ObservableObject {
         case untested = "Untested"
         case active = "Active"
         case failed = "Failed"
+        case timedOut = "Timed Out"
         case disabled = "Disabled"
     }
 
@@ -61,6 +62,9 @@ class PluginManager: ObservableObject {
                 case .failed:
                     if case .failed = plugin.status { return true }
                     return false
+                case .timedOut:
+                    if case .timedOut = plugin.status { return true }
+                    return false
                 case .disabled: return plugin.status == .disabled
                 }
             }()
@@ -68,13 +72,14 @@ class PluginManager: ObservableObject {
         }
     }
 
-    var pluginCounts: (total: Int, active: Int, failed: Int, disabled: Int, untested: Int) {
+    var pluginCounts: (total: Int, active: Int, failed: Int, timedOut: Int, disabled: Int, untested: Int) {
         let total = plugins.count
         let active = plugins.filter { if case .active = $0.status { return true }; return false }.count
         let failed = plugins.filter { if case .failed = $0.status { return true }; return false }.count
+        let timedOut = plugins.filter { if case .timedOut = $0.status { return true }; return false }.count
         let disabled = plugins.filter { $0.status == .disabled }.count
         let untested = plugins.filter { if case .untested = $0.status { return true }; return false }.count
-        return (total, active, failed, disabled, untested)
+        return (total, active, failed, timedOut, disabled, untested)
     }
 
     func refresh() {
@@ -401,19 +406,22 @@ class PluginManager: ObservableObject {
         }
     }
 
-    /// Tests every untested plugin one at a time, publishing progress as it
-    /// goes. Each test's blocking work runs off the main actor (see
-    /// `performTest`), so the list keeps updating live — statuses flip from
-    /// spinner to result one-by-one instead of the window freezing until the
-    /// whole run finishes.
+    /// Tests every untested (or previously timed-out — that's a shrug, not a
+    /// verdict, so it's worth another try) plugin one at a time, publishing
+    /// progress as it goes. Each test's blocking work runs off the main actor
+    /// (see `performTest`), so the list keeps updating live — statuses flip
+    /// from spinner to result one-by-one instead of the window freezing until
+    /// the whole run finishes.
     func testAllUntested() {
         guard batchTestTask == nil else { return }
         batchTestTask = Task {
             defer { batchTestTask = nil }
 
             let untested = plugins.filter {
-                if case .untested = $0.status { return true }
-                return false
+                switch $0.status {
+                case .untested, .timedOut: return true
+                default: return false
+                }
             }
             guard !untested.isEmpty else { return }
 
@@ -483,7 +491,7 @@ class PluginManager: ObservableObject {
                 arguments: ["-v", type, subtype, manufacturer],
                 timeoutSeconds: 12
             ) else {
-                return .failed("Timed out")
+                return .timedOut
             }
             let output = String(data: data, encoding: .utf8) ?? ""
             return output.contains("AU VALIDATION SUCCEEDED")

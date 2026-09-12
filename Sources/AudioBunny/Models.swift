@@ -23,13 +23,19 @@ enum PluginStatus: Sendable {
     case testing
     case active
     case failed(String)
+    /// Validation didn't finish within its time limit — inconclusive, not a
+    /// verdict. Deliberately distinct from `.failed`: it's never counted as
+    /// failing, never eligible for "Disable Failing", and isn't persisted to
+    /// test history, so the plugin gets a clean retest next time.
+    case timedOut
     case disabled
 }
 
 extension PluginStatus: Equatable {
     static func == (lhs: PluginStatus, rhs: PluginStatus) -> Bool {
         switch (lhs, rhs) {
-        case (.untested, .untested), (.testing, .testing), (.active, .active), (.disabled, .disabled): return true
+        case (.untested, .untested), (.testing, .testing), (.active, .active),
+             (.timedOut, .timedOut), (.disabled, .disabled): return true
         case (.failed(let a), .failed(let b)): return a == b
         default: return false
         }
@@ -41,6 +47,7 @@ extension PluginStatus: Equatable {
         case .testing: return "Testing..."
         case .active: return "Active"
         case .failed(let msg): return "Failed: \(msg)"
+        case .timedOut: return "Timed Out"
         case .disabled: return "Disabled"
         }
     }
@@ -51,6 +58,7 @@ extension PluginStatus: Equatable {
         case .testing: return "orange"
         case .active: return "green"
         case .failed: return "red"
+        case .timedOut: return "yellow"
         case .disabled: return "secondary"
         }
     }
