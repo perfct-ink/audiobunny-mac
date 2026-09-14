@@ -18,3 +18,7 @@ fastlane/test_output
 # Swift Package Manager
 .build/
 *.app/
+
+# Claude Code (personal, local-only)
+.claude/settings.local.json
+.claude/hooks/

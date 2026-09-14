@@ -17,6 +17,46 @@
             "target": "AudioBunny",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release AudioBunny"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:audiobunny-mac}",
+            "name": "Debug VST2Prober",
+            "target": "VST2Prober",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug VST2Prober"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:audiobunny-mac}",
+            "name": "Release VST2Prober",
+            "target": "VST2Prober",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release VST2Prober"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:audiobunny-mac}",
+            "name": "Debug AudioBunny",
+            "target": "AudioBunny",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug AudioBunny"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:audiobunny-mac}",
+            "name": "Release AudioBunny",
+            "target": "AudioBunny",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release AudioBunny"
         }
     ]
 }
