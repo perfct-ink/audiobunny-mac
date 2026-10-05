@@ -449,29 +449,35 @@ struct CatalogPluginDetailPage: View {
             detailRow("Formats",   plugin.formats.joined(separator: ", ")),
             detailRow("Price",     plugin.price),
         ]
-        if let site = websiteURL {
-            rows.append(AnyView(
-                HStack(alignment: .top) {
-                    Text("Website")
-                        .foregroundStyle(.secondary)
-                        .frame(width: 100, alignment: .leading)
-                    Link(destination: site) {
-                        HStack(spacing: 4) {
-                            Text(site.host ?? site.absoluteString).lineLimit(1).truncationMode(.middle)
-                            Image(systemName: "arrow.up.right.square")
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(.vertical, 7).padding(.horizontal, 8)
-            ))
+        if let site = Self.webURL(plugin.websiteURL) {
+            rows.append(linkRow("Website", site))
+        }
+        if let site = Self.webURL(plugin.developerURL ?? "") {
+            rows.append(linkRow("Developer site", site))
         }
         return rows
     }
 
-    /// The plugin's (or its developer's) website, if it published a usable one.
-    private var websiteURL: URL? {
-        let s = plugin.websiteURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func linkRow(_ label: String, _ site: URL) -> AnyView {
+        AnyView(
+            HStack(alignment: .top) {
+                Text(label)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 100, alignment: .leading)
+                Link(destination: site) {
+                    HStack(spacing: 4) {
+                        Text(site.host ?? site.absoluteString).lineLimit(1).truncationMode(.middle)
+                        Image(systemName: "arrow.up.right.square")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.vertical, 7).padding(.horizontal, 8)
+        )
+    }
+
+    private static func webURL(_ raw: String) -> URL? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty, let url = URL(string: s),
               url.scheme == "http" || url.scheme == "https" else { return nil }
         return url

@@ -35,6 +35,8 @@ struct CatalogPlugin: Identifiable, Codable, Hashable {
     let tags: [String]
     let version: String
     let websiteURL: String
+    /// The developer's own site, when the catalog has one — distinct from the plugin's page.
+    let developerURL: String?
     let price: String
     let thumbnailURL: String?
 

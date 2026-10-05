@@ -110,6 +110,7 @@ extension CatalogPlugin {
             tags:         p.tags?.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } ?? [],
             version:      p.version ?? "",
             websiteURL:   p.websiteUrl ?? "",
+            developerURL: p.manufacturerUrl,
             price:        price,
             thumbnailURL: p.thumbnailUrl,
             downloadURL:  p.downloadUrl,

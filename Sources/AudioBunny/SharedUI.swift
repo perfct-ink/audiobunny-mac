@@ -9,8 +9,8 @@ import SwiftUI
 func pluginFormatColor(_ format: String) -> Color {
     switch format.uppercased().replacingOccurrences(of: " ", with: "") {
     case "AU", "AUDIOUNIT": return .blue
-    case "VST2", "VST":     return Color(red: 0.36, green: 0.16, blue: 0.56)
-    case "VST3":            return Color(red: 0.68, green: 0.42, blue: 0.98)
+    case "VST2", "VST":     return .purple
+    case "VST3":            return .indigo
     default:                return .secondary
     }
 }

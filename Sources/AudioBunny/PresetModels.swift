@@ -65,6 +65,7 @@ struct APIPlugin: Decodable, Identifiable {
     let thumbnailUrl: String?
     let downloadUrl: String?
     let websiteUrl: String?
+    let manufacturerUrl: String?
     let githubRepo: String?
     let isFree: Bool
     let priceUsd: Double?
@@ -78,6 +79,7 @@ struct APIPlugin: Decodable, Identifiable {
         case thumbnailUrl = "thumbnail_url"
         case downloadUrl  = "download_url"
         case websiteUrl   = "website_url"
+        case manufacturerUrl = "manufacturer_url"
         case githubRepo   = "github_repo"
         case isFree       = "is_free"
         case priceUsd     = "price_usd"

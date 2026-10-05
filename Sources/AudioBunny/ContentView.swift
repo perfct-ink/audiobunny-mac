@@ -859,13 +859,7 @@ struct PluginDetailView: View {
         )
     }
 
-    private var typeColor: Color {
-        switch plugin.type {
-        case .audioUnit: return .blue
-        case .vst2: return .purple
-        case .vst3: return .indigo
-        }
-    }
+    private var typeColor: Color { pluginFormatColor(plugin.type.rawValue) }
 
     private var categoryColor: Color {
         switch plugin.category {
