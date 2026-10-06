@@ -1,31 +1,100 @@
 import XCTest
 @testable import AudioBunny
 
+final class PresetFolderLocatorTests: XCTestCase {
+    private var home: URL!
+
+    override func setUp() {
+        super.setUp()
+        home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioBunnyLocatorTests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    }
+
+    override func tearDown() {
+        try? FileManager.default.removeItem(at: home)
+        home = nil
+        super.tearDown()
+    }
+
+    private func makeDir(_ relative: String) throws -> URL {
+        let url = home.appendingPathComponent(relative)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func paths(_ urls: [URL]) -> [String] {
+        urls.map { $0.standardizedFileURL.path }
+    }
+
+    func testFindsKnownSerumLayout() throws {
+        let presets = try makeDir("Documents/Xfer/Serum Presets/Presets")
+        XCTAssertEqual(paths(locatePluginFolders(pluginName: "Serum", manufacturer: "Xfer Records", home: home)),
+                       paths([presets]))
+    }
+
+    func testFindsNativeInstrumentsProductFolderByName() throws {
+        let kontakt = try makeDir("Documents/Native Instruments/Kontakt 7")
+        XCTAssertEqual(paths(locatePluginFolders(pluginName: "Kontakt 7", manufacturer: "Native Instruments", home: home)),
+                       paths([kontakt]))
+    }
+
+    func testFindsUnknownPluginFolderByName() throws {
+        let presets = try makeDir("Documents/Pro-Q 3 Presets")
+        _ = try makeDir("Documents/Something Else")
+        XCTAssertEqual(paths(locatePluginFolders(pluginName: "Pro-Q 3", manufacturer: "FabFilter", home: home)),
+                       paths([presets]))
+    }
+
+    func testFindsPluginFolderUnderManufacturerFolder() throws {
+        let presets = try makeDir("Music/FabFilter/Pro-Q 3")
+        XCTAssertEqual(paths(locatePluginFolders(pluginName: "Pro-Q 3", manufacturer: "FabFilter", home: home)),
+                       paths([presets]))
+    }
+
+    func testSkipsConflictedCopies() throws {
+        _ = try makeDir("Documents/Pro-Q 3 (conflicted copy 2019)")
+        XCTAssertTrue(locatePluginFolders(pluginName: "Pro-Q 3", manufacturer: "FabFilter", home: home).isEmpty)
+    }
+
+    func testIgnoresNamesTooShortToMatchSafely() throws {
+        _ = try makeDir("Documents/OTTER stuff")
+        XCTAssertTrue(locatePluginFolders(pluginName: "O", manufacturer: "X", home: home).isEmpty)
+    }
+
+    func testRemoteNameStripsSlashes() {
+        let target = SyncTarget(owner: "A/B", localURL: home.appendingPathComponent("x/Presets"))
+        XCTAssertEqual(target.remoteName, "A-B — Presets")
+    }
+
+    func testAbletonUserLibraryFoldersExcludeProjectInfo() throws {
+        let presets = try makeDir("Music/Ableton/User Library/Presets")
+        let samples = try makeDir("Music/Ableton/User Library/Samples")
+        _ = try makeDir("Music/Ableton/User Library/Ableton Project Info")
+        XCTAssertEqual(paths(abletonUserLibraryFolders(home: home)), paths([presets, samples]))
+    }
+
+    func testSyncTargetsGroupsByPluginWithManualFolders() throws {
+        let serum = try makeDir("Documents/Xfer/Serum Presets/Presets")
+        let manual = try makeDir("Somewhere/Serum Extra")
+        let targets = syncTargets(plugins: [(name: "Serum", manufacturer: "Xfer"),
+                                            (name: "serum", manufacturer: "Xfer")],
+                                  manualFolders: ["Serum": [manual]],
+                                  home: home)
+        let foundPaths: Set<String> = Set(targets.map { $0.localURL.standardizedFileURL.path })
+        let expectedPaths: Set<String> = [serum.standardizedFileURL.path, manual.standardizedFileURL.path]
+        XCTAssertEqual(Set(targets.map(\.owner)), ["Serum"])
+        XCTAssertEqual(foundPaths, expectedPaths)
+    }
+
+    func testSyncTargetRemoteNameIsOwnerAndLabel() {
+        let target = SyncTarget(owner: "Ableton Live", localURL: home.appendingPathComponent("Music/Ableton/User Library/Presets"))
+        XCTAssertEqual(target.remoteName, "Ableton Live — Presets")
+    }
+
+}
+
 final class PresetSyncPureLogicTests: XCTestCase {
-
-    func testVendorPresetDirectoryKnownVendors() {
-        XCTAssertEqual(
-            vendorPresetDirectory(pluginName: "Serum", manufacturer: "Xfer Records").path,
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Documents/Xfer/Serum Presets/Presets").path)
-
-        XCTAssertEqual(
-            vendorPresetDirectory(pluginName: "Guitar Rig 7", manufacturer: "Native Instruments").path,
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Documents/Native Instruments/Guitar Rig 7/Presets").path)
-    }
-
-    func testVendorPresetDirectoryFallsBackToAppleStandardLocation() {
-        XCTAssertEqual(
-            vendorPresetDirectory(pluginName: "Pro-Q 3", manufacturer: "FabFilter").path,
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Audio/Presets/FabFilter/Pro-Q 3").path)
-    }
-
-    func testPresetSyncKeyIsFormatIndependentAndCaseInsensitive() {
-        XCTAssertEqual(presetSyncKey(pluginName: "Serum", manufacturer: "Xfer"),
-                       presetSyncKey(pluginName: "SERUM", manufacturer: "XFER"))
-    }
 
     func testIsSafeSyncDirectoryRejectsOutsideOrEqualToHome() {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -188,8 +257,8 @@ final class PresetSyncManagerTests: XCTestCase {
 
     func testStatusIsNoSyncFolderUntilOneIsChosen() {
         let manager = PresetSyncManager(userDefaults: defaults)
-        let plugin = SyncablePlugin(name: "Pro-Q 3", manufacturer: "FabFilter")
-        XCTAssertEqual(manager.status(for: plugin), .noSyncFolder)
+        let target = SyncTarget(owner: "FabFilter Pro-Q 3", localURL: syncFolder.appendingPathComponent("Local/Presets"))
+        XCTAssertEqual(manager.status(for: target), .noSyncFolder)
     }
 
     func testChooseSyncFolderPersists() {
@@ -203,16 +272,26 @@ final class PresetSyncManagerTests: XCTestCase {
     func testEnableSyncLinksAndStatusReportsSynced() async throws {
         let manager = PresetSyncManager(userDefaults: defaults)
         manager.chooseSyncFolder(syncFolder)
-        let name = "TestSynth-\(UUID().uuidString)"
-        let plugin = SyncablePlugin(name: name, manufacturer: "TestVendor")
-        defer { try? FileManager.default.removeItem(at: manager.localDirectory(for: plugin)) }
+        let local = syncFolder.appendingPathComponent("Local/TestSynth-\(UUID().uuidString)")
+        let target = SyncTarget(owner: "TestSynth", localURL: local)
+        try FileManager.default.createDirectory(at: local, withIntermediateDirectories: true)
 
-        await manager.enableSync(for: plugin)
+        await manager.enableSync(for: target)
 
         XCTAssertNil(manager.lastError)
-        XCTAssertEqual(manager.status(for: plugin), .synced)
+        XCTAssertEqual(manager.status(for: target), .synced)
 
-        await manager.disableSync(for: plugin)
-        XCTAssertEqual(manager.status(for: plugin), .notSynced)
+        await manager.disableSync(for: target)
+        XCTAssertEqual(manager.status(for: target), .notSynced)
+    }
+
+    func testManualFoldersPersistAcrossInstances() {
+        let first = PresetSyncManager(userDefaults: defaults)
+        let folder = syncFolder.appendingPathComponent("ManualPresets")
+        first.addManualFolder(folder, owner: "Pro-Q 3")
+        first.addManualFolder(folder, owner: "Pro-Q 3")
+
+        let second = PresetSyncManager(userDefaults: defaults)
+        XCTAssertEqual(second.manualFolderURLs["Pro-Q 3"]?.map(\.path), [folder.path])
     }
 }
