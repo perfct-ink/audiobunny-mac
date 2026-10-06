@@ -7,6 +7,7 @@ import AppKit
 struct AppSettingsSyncSheet: View {
     @Binding var isPresented: Bool
     @EnvironmentObject var syncManager: AppSettingsSyncManager
+    @EnvironmentObject var pluginManager: PluginManager
     @State private var showItemPicker = false
     @State private var pendingAction: (item: AppSettingsItem, enabling: Bool, inCloud: Bool)?
 
@@ -15,7 +16,7 @@ struct AppSettingsSyncSheet: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Sync App Settings").font(.title3).fontWeight(.semibold)
-                    Text("Move app settings into iCloud Drive or Dropbox and link them back, so every Mac shares one copy.")
+                    Text("Move your audio apps' and plugins' settings into iCloud Drive or Dropbox and link them back, so every Mac shares one copy.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -55,9 +56,17 @@ struct AppSettingsSyncSheet: View {
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if !syncManager.hasDiscovered {
+                VStack(spacing: 8) {
+                    ProgressView()
+                    Text("Looking for audio app and plugin settings…").foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(syncManager.items) { item in
-                    AppSettingsSyncRow(item: item, pendingAction: $pendingAction)
+                List {
+                    itemSection("Audio Apps", source: .audioApp)
+                    itemSection("Plugins", source: .pluginVendor)
+                    itemSection("Added by You", source: .custom)
                 }
                 .listStyle(.inset)
             }
@@ -76,7 +85,12 @@ struct AppSettingsSyncSheet: View {
             .padding(12)
         }
         .frame(width: 620, height: 520)
-        .onAppear { syncManager.refreshSyncRoot() }
+        // Re-runs when the provider (and so its folder) changes, so items
+        // another Mac already synced show up here, and when a plugin scan
+        // finishes while the sheet is open.
+        .task(id: "\(syncManager.syncRoot?.path ?? "")|\(pluginManager.plugins.count)") {
+            await syncManager.discover(pluginManufacturers: pluginManager.plugins.map(\.manufacturer))
+        }
         .fileImporter(isPresented: $showItemPicker, allowedContentTypes: [.folder, .item]) { result in
             if case .success(let url) = result {
                 syncManager.addCustomItem(at: url)
@@ -107,6 +121,18 @@ struct AppSettingsSyncSheet: View {
         }
     }
 
+    @ViewBuilder
+    private func itemSection(_ title: String, source: AppSettingsItem.Source) -> some View {
+        let sectionItems = syncManager.items.filter { $0.source == source }
+        if !sectionItems.isEmpty {
+            Section(title) {
+                ForEach(sectionItems) { item in
+                    AppSettingsSyncRow(item: item, pendingAction: $pendingAction)
+                }
+            }
+        }
+    }
+
     private var confirmationTitle: String {
         guard let action = pendingAction else { return "" }
         return action.enabling ? "Sync \(action.item.appName) settings?" : "Stop syncing \(action.item.appName) settings?"
@@ -120,7 +146,11 @@ struct AppSettingsSyncSheet: View {
         if action.inCloud {
             return "Another Mac already synced \(action.item.appName). This Mac will switch to those settings; its current ones are kept as a backup next to the original. Quit \(action.item.appName) first."
         }
-        return "AudioBunny will move \(action.item.appName)'s settings into \(provider) and leave a link in their place. Quit \(action.item.appName) first."
+        var message = "AudioBunny will move \(action.item.appName)'s settings into \(provider) and leave a link in their place. Quit \(action.item.appName) first."
+        if let size = syncManager.sizes[action.item.id], size >= largeItemBytes {
+            message += " This is \(formattedSize(size)), all of which will upload to \(provider)."
+        }
+        return message
     }
 
     @ViewBuilder
@@ -139,7 +169,7 @@ struct AppSettingsSyncSheet: View {
                 .labelsHidden()
                 .pickerStyle(.segmented)
                 .frame(width: 240)
-                .disabled(syncManager.hasSyncedItems)
+                .disabled(!syncManager.hasDiscovered || syncManager.hasSyncedItems)
                 .help(syncManager.hasSyncedItems ? "Stop syncing everything first to switch." : "")
                 Spacer()
                 if let root = syncManager.syncRoot {
@@ -160,6 +190,13 @@ struct AppSettingsSyncSheet: View {
             }
         }
     }
+}
+
+/// Above this, the UI calls out how much will upload before syncing.
+let largeItemBytes: Int64 = 1_000_000_000
+
+func formattedSize(_ bytes: Int64) -> String {
+    ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
 }
 
 // MARK: - Per-item row
@@ -187,6 +224,13 @@ struct AppSettingsSyncRow: View {
             }
 
             Spacer()
+
+            if case .notSynced(inCloud: false) = status, let size = syncManager.sizes[item.id], size > 0 {
+                Text(formattedSize(size))
+                    .font(.caption2)
+                    .foregroundStyle(size >= largeItemBytes ? Color.orange : Color.secondary)
+                    .help(size >= largeItemBytes ? "Large — make sure your \(syncManager.provider?.displayName ?? "cloud") storage has room." : "")
+            }
 
             statusView(status)
 

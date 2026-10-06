@@ -90,6 +90,44 @@ final class AppSettingsSyncTests: XCTestCase {
         }
     }
 
+    // MARK: Discovery
+
+    func testVendorFolderMatchingIgnoresCorporateNoise() {
+        XCTAssertTrue(vendorFolderMatches(folderName: "Xfer", manufacturer: "Xfer Records"))
+        XCTAssertTrue(vendorFolderMatches(folderName: "Native Instruments", manufacturer: "Native Instruments GmbH"))
+        XCTAssertTrue(vendorFolderMatches(folderName: "u-he", manufacturer: "u-he"))
+        XCTAssertTrue(vendorFolderMatches(folderName: "Spitfire Audio", manufacturer: "Spitfire"))
+        XCTAssertFalse(vendorFolderMatches(folderName: "Apple", manufacturer: "Apple"))
+        XCTAssertFalse(vendorFolderMatches(folderName: "Audio", manufacturer: "Audio Inc"))
+        XCTAssertFalse(vendorFolderMatches(folderName: "FabFilter", manufacturer: "Xfer Records"))
+    }
+
+    func testDiscoveryFindsInstalledAppsAndPluginVendorsOnly() throws {
+        let fm = FileManager.default
+        for path in ["Music/Ableton/User Library", "Library/Application Support/FabFilter",
+                     "Library/Application Support/Some Other App", "Documents/Xfer",
+                     "Library/Preferences/Cubase 13"] {
+            try fm.createDirectory(at: home.appendingPathComponent(path), withIntermediateDirectories: true)
+        }
+        // Synced from another Mac, nothing local yet.
+        try fm.createDirectory(at: syncRoot.appendingPathComponent("Documents/Bitwig Studio"),
+                               withIntermediateDirectories: true)
+
+        let items = discoverAppSettingsItems(home: home, syncRoot: syncRoot,
+                                             pluginManufacturers: ["FabFilter", "Xfer Records", "FabFilter"])
+        let ids = items.map(\.relativePath)
+
+        XCTAssertTrue(ids.contains("Music/Ableton/User Library"))
+        XCTAssertTrue(ids.contains("Documents/Bitwig Studio"))
+        XCTAssertTrue(ids.contains("Library/Preferences/Cubase 13"))
+        XCTAssertTrue(ids.contains("Library/Application Support/FabFilter"))
+        XCTAssertTrue(ids.contains("Documents/Xfer"))
+        XCTAssertFalse(ids.contains("Library/Application Support/Some Other App"))
+        XCTAssertFalse(ids.contains("Library/Application Support/REAPER"))
+        XCTAssertEqual(Set(ids).count, ids.count)
+        XCTAssertEqual(items.first { $0.relativePath == "Documents/Xfer" }?.source, .pluginVendor)
+    }
+
     // MARK: Link / unlink
 
     func testFirstMacMovesFolderIntoSyncFolderAndLinksBack() throws {
@@ -176,6 +214,31 @@ final class AppSettingsSyncTests: XCTestCase {
             guard case AppSettingsSyncError.alreadyLinkedElsewhere = error else {
                 return XCTFail("expected alreadyLinkedElsewhere, got \(error)")
             }
+        }
+    }
+
+    func testLinkRefusesFolderAlreadyContainingALink() throws {
+        let local = home.appendingPathComponent("Documents/Xfer")
+        try FileManager.default.createDirectory(at: local, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: local.appendingPathComponent("Serum Presets"),
+                                                   withDestinationURL: home.appendingPathComponent("elsewhere"))
+
+        XCTAssertThrowsError(try linkAppSettings(local: local, toSynced: syncRoot.appendingPathComponent("Documents/Xfer"),
+                                                 syncRoot: syncRoot, home: home)) {
+            XCTAssertEqual($0 as? AppSettingsSyncError, .containsLinks)
+        }
+    }
+
+    func testLinkRefusesItemInsideALinkedFolder() throws {
+        let outer = home.appendingPathComponent("Library/Application Support/Vendor")
+        try write("x", to: outer.appendingPathComponent("settings.json"))
+        try linkAppSettings(local: outer, toSynced: syncRoot.appendingPathComponent("Library/Application Support/Vendor"),
+                            syncRoot: syncRoot, home: home)
+
+        let inner = outer.appendingPathComponent("settings.json")
+        XCTAssertThrowsError(try linkAppSettings(local: inner, toSynced: home.appendingPathComponent("Other/settings.json"),
+                                                 syncRoot: syncRoot, home: home)) {
+            XCTAssertEqual($0 as? AppSettingsSyncError, .insideLinkedFolder)
         }
     }
 
