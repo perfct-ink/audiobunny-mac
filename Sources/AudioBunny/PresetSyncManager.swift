@@ -127,7 +127,7 @@ func unlinkPresetDirectory(local localDir: URL) throws {
     try fm.copyItem(at: URL(fileURLWithPath: destPath), to: localDir)
 }
 
-private func presetSyncBackupTimestamp() -> String {
+func presetSyncBackupTimestamp() -> String {
     let formatter = DateFormatter()
     formatter.dateFormat = "yyyy-MM-dd HHmmss"
     return formatter.string(from: Date())

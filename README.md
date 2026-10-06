@@ -11,6 +11,7 @@ A macOS app for managing Audio Units and VST plugins.
   - VST2/VST3: bundle loaded and entry-point symbol verified (`VSTPluginMain` / `GetPluginFactory`)
 - **Disable** plugins by moving them to `~/Library/Audio/Plug-Ins/Disabled/`
 - **Re-enable** disabled plugins, restoring them to their original folder
+- **Sync app settings** across Macs: moves an app's settings folder (Ableton User Library, Logic's Audio Music Apps, Bitwig, REAPER, or any folder/file you add) into iCloud Drive or Dropbox under `AudioBunny/App Settings/`, and leaves a symlink at the original location. Preference plists and sandboxed app containers are refused, since macOS replaces symlinks there.
 
 ## Plugin scan locations
 

@@ -39,6 +39,7 @@ struct ContentView: View {
     @State private var selectedPlugin: AudioPlugin? = nil
     @State private var showAccountSheet = false
     @State private var showComputersSheet = false
+    @State private var showAppSettingsSyncSheet = false
     @AppStorage("audiobunny.activeTab") private var activeTab: AppTab = .browse
 
     var body: some View {
@@ -69,6 +70,12 @@ struct ContentView: View {
                 }
             }
             ToolbarItem(placement: .primaryAction) {
+                Button { showAppSettingsSyncSheet = true } label: {
+                    Label("App Settings", systemImage: "gearshape.2")
+                }
+                .help("Sync app settings across your Macs with iCloud Drive or Dropbox")
+            }
+            ToolbarItem(placement: .primaryAction) {
                 accountButton
             }
         }
@@ -78,6 +85,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showComputersSheet) {
             OtherComputersSheet(isPresented: $showComputersSheet)
+        }
+        .sheet(isPresented: $showAppSettingsSyncSheet) {
+            AppSettingsSyncSheet(isPresented: $showAppSettingsSyncSheet)
         }
         .onChange(of: presetManager.currentUser) { newValue in
             guard newValue != nil else { return }
