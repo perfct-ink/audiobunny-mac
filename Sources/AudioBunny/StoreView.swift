@@ -1,5 +1,76 @@
 import SwiftUI
 
+enum DiscoverResource: String, CaseIterable, Identifiable {
+    case plugins = "Plugins"
+    case presets = "Presets"
+    case samples = "Samples"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .plugins: return "waveform"
+        case .presets: return "music.note.list"
+        case .samples: return "play.circle"
+        }
+    }
+}
+
+struct DiscoverView: View {
+    @AppStorage("audiobunny.discoverResource") private var resource: DiscoverResource = .plugins
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                ForEach(DiscoverResource.allCases) { item in
+                    Button {
+                        resource = item
+                    } label: {
+                        Label(item.rawValue, systemImage: item.icon)
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .foregroundStyle(resource == item ? Color.accentColor : Color.secondary)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7)
+                                    .fill(resource == item ? Color.accentColor.opacity(0.15) : Color.clear)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(resource == item ? .isSelected : [])
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+            .background(.bar)
+
+            Divider()
+
+            switch resource {
+            case .plugins:
+                StoreView()
+            case .presets:
+                PresetsView(isDiscover: true)
+            case .samples:
+                VStack(spacing: 12) {
+                    Image(systemName: "play.circle")
+                        .font(.system(size: 40))
+                        .foregroundStyle(.secondary)
+                    Text("Discover Samples")
+                        .font(.title2).fontWeight(.semibold)
+                    Text("Sample discovery is coming soon. Explore your local collection in My Samples.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 420)
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+}
+
 // MARK: - Discover (Store) View
 
 struct StoreView: View {
@@ -41,7 +112,7 @@ struct StoreView: View {
                 .font(.largeTitle)
                 .fontWeight(.bold)
             HStack {
-                Text("Browse instruments, effects, and presets shared by the community, and install them straight into your plugin folders.")
+                Text("Browse instruments and effects shared by the community, and install them straight into your plugin folders.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Spacer()

@@ -5,6 +5,7 @@ import AuthenticationServices
 // MARK: - Presets View
 
 struct PresetsView: View {
+    var isDiscover = false
     @EnvironmentObject var presetManager: PresetManager
     @State private var selectedPreset: APIPreset? = nil
     @State private var showUploadSheet = false
@@ -12,7 +13,7 @@ struct PresetsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TabActionBar(title: "Presets") {
+            TabActionBar(title: isDiscover ? "Discover Presets" : "My Presets") {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
@@ -24,12 +25,14 @@ struct PresetsView: View {
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
                 .frame(width: 220)
 
-                Button {
-                    showSyncSheet = true
-                } label: {
-                    Label("Sync Presets", systemImage: "arrow.triangle.2.circlepath")
+                if !isDiscover {
+                    Button {
+                        showSyncSheet = true
+                    } label: {
+                        Label("Sync Presets", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .help("Link plugin preset folders to a shared folder across your Macs")
                 }
-                .help("Link plugin preset folders to a shared folder across your Macs")
 
                 if presetManager.currentUser != nil {
                     Button {

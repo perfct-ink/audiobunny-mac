@@ -13,9 +13,9 @@ enum AppTab: String, CaseIterable {
         switch self {
         case .browse: return "Discover"
         case .library: return "My Plugins"
-        case .presets: return "Presets"
+        case .presets: return "My Presets"
         case .liveProjects: return "My Projects"
-        case .samples: return "Samples"
+        case .samples: return "My Samples"
         }
     }
 
@@ -49,7 +49,7 @@ struct ContentView: View {
             Group {
                 switch activeTab {
                 case .browse:
-                    StoreView()
+                    DiscoverView()
                 case .library:
                     libraryTab
                 case .presets:
@@ -934,4 +934,3 @@ extension View {
         }
     }
 }
-

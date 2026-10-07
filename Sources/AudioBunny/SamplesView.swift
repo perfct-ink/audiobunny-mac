@@ -16,7 +16,7 @@ struct SamplesView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TabActionBar(title: "Samples") {
+            TabActionBar(title: "My Samples") {
                 Toggle(isOn: $sampleManager.isLooping) {
                     Label("Loop", systemImage: "repeat")
                 }
