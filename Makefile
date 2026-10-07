@@ -9,8 +9,9 @@ INSTALL_PATH   := /Applications/$(APP_NAME).app
 # VST2Prober is built universal (arm64 + x86_64) so it can dlopen Intel-only
 # VST2 plugins under Rosetta as well as native arm64 ones — see PluginManager's
 # VST2 category probing.
-VST2PROBER_DEBUG   := .build/apple/Products/Debug/VST2Prober
-VST2PROBER_RELEASE := .build/apple/Products/Release/VST2Prober
+# Ask SwiftPM for the output directory; it varies by build system/toolchain.
+VST2PROBER_DEBUG   = $$(swift build -c debug --arch arm64 --arch x86_64 --product VST2Prober --show-bin-path)/VST2Prober
+VST2PROBER_RELEASE = $$(swift build -c release --arch arm64 --arch x86_64 --product VST2Prober --show-bin-path)/VST2Prober
 
 .PHONY: all dev build clean open close install uninstall reinstall \
         test test-stress help
@@ -35,6 +36,7 @@ dev:
 	@cp $(VST2PROBER_DEBUG) $(DEBUG_BUNDLE)/Contents/MacOS/VST2Prober
 	@cp Info.plist $(DEBUG_BUNDLE)/Contents/Info.plist
 	@cp AppIcon.icns $(DEBUG_BUNDLE)/Contents/Resources/AppIcon.icns
+	@cp -R .build/debug/$(APP_NAME)_$(APP_NAME).bundle $(DEBUG_BUNDLE)/Contents/Resources/
 	open $(DEBUG_BUNDLE)
 
 # ── Production ────────────────────────────────────────────────────────────────
@@ -49,9 +51,10 @@ build:
 	@cp $(VST2PROBER_RELEASE) $(RELEASE_BUNDLE)/Contents/MacOS/VST2Prober
 	@cp Info.plist $(RELEASE_BUNDLE)/Contents/Info.plist
 	@cp AppIcon.icns $(RELEASE_BUNDLE)/Contents/Resources/AppIcon.icns
+	@cp -R .build/release/$(APP_NAME)_$(APP_NAME).bundle $(RELEASE_BUNDLE)/Contents/Resources/
 
-open: build
-	-killall "$(APP_NAME)" 2>/dev/null
+open:
+	@killall "$(APP_NAME)" 2>/dev/null || true
 	open $(RELEASE_BUNDLE)
 
 close:
@@ -103,7 +106,7 @@ help:
 	@echo ""
 	@echo "  Production"
 	@echo "    make build        Build release bundle"
-	@echo "    make open         Build release + open"
+	@echo "    make open         Open existing release bundle"
 	@echo "    make close        Kill the running app"
 	@echo ""
 	@echo "  Install"
