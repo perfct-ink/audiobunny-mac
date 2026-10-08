@@ -8,6 +8,7 @@ enum AppTab: String, CaseIterable {
     case presets
     case samples
     case liveProjects
+    case settingsSync
 
     var title: String {
         switch self {
@@ -16,6 +17,7 @@ enum AppTab: String, CaseIterable {
         case .presets: return "My Presets"
         case .liveProjects: return "My Projects"
         case .samples: return "My Samples"
+        case .settingsSync: return "Settings Sync"
         }
     }
 
@@ -26,6 +28,7 @@ enum AppTab: String, CaseIterable {
         case .presets: return "music.note.list"
         case .liveProjects: return "waveform.badge.exclamationmark"
         case .samples: return "play.circle"
+        case .settingsSync: return "gearshape.2"
         }
     }
 }
@@ -39,7 +42,6 @@ struct ContentView: View {
     @State private var selectedPlugin: AudioPlugin? = nil
     @State private var showAccountSheet = false
     @State private var showComputersSheet = false
-    @State private var showAppSettingsSyncSheet = false
     @AppStorage("audiobunny.activeTab") private var activeTab: AppTab = .browse
 
     var body: some View {
@@ -58,6 +60,8 @@ struct ContentView: View {
                     LiveProjectsView()
                 case .samples:
                     SamplesView()
+                case .settingsSync:
+                    SettingsSyncView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -70,12 +74,6 @@ struct ContentView: View {
                 }
             }
             ToolbarItem(placement: .primaryAction) {
-                Button { showAppSettingsSyncSheet = true } label: {
-                    Label("App Settings", systemImage: "gearshape.2")
-                }
-                .help("Sync app settings across your Macs with iCloud Drive or Dropbox")
-            }
-            ToolbarItem(placement: .primaryAction) {
                 accountButton
             }
         }
@@ -85,9 +83,6 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showComputersSheet) {
             OtherComputersSheet(isPresented: $showComputersSheet)
-        }
-        .sheet(isPresented: $showAppSettingsSyncSheet) {
-            AppSettingsSyncSheet(isPresented: $showAppSettingsSyncSheet)
         }
         .onChange(of: presetManager.currentUser) { newValue in
             guard newValue != nil else { return }

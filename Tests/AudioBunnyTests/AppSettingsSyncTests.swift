@@ -102,38 +102,88 @@ final class AppSettingsSyncTests: XCTestCase {
         XCTAssertFalse(vendorFolderMatches(folderName: "FabFilter", manufacturer: "Xfer Records"))
     }
 
-    func testDiscoveryFindsInstalledAppsAndPluginVendorsOnly() throws {
+    func testPluginNameMatching() {
+        XCTAssertTrue(folderMatchesPluginName("ValhallaRoom", pluginName: "Valhalla Room"))
+        XCTAssertTrue(folderMatchesPluginName("Pro-Q 3", pluginName: "Pro-Q 3"))
+        XCTAssertFalse(folderMatchesPluginName("Pro-Q 2", pluginName: "Pro-Q 3"))
+        XCTAssertFalse(folderMatchesPluginName("EQ", pluginName: "EQ"))
+    }
+
+    func testDiscoveryFindsAppsAndEachPluginsOwnSettingsFolder() throws {
         let fm = FileManager.default
-        for path in ["Music/Ableton/User Library", "Library/Application Support/FabFilter",
-                     "Library/Application Support/Some Other App", "Documents/Xfer",
+        for path in ["Music/Ableton/User Library",
+                     "Library/Application Support/FabFilter/Pro-Q 3",
+                     "Library/Application Support/FabFilter/Shared",
+                     "Library/Application Support/u-he",
+                     "Library/Preferences/Valhalla Room",
+                     "Library/Application Support/Some Other App",
                      "Library/Preferences/Cubase 13"] {
             try fm.createDirectory(at: home.appendingPathComponent(path), withIntermediateDirectories: true)
         }
-        // Synced from another Mac, nothing local yet.
-        try fm.createDirectory(at: syncRoot.appendingPathComponent("Documents/Bitwig Studio"),
-                               withIntermediateDirectories: true)
+        // Moved into the destination from another Mac; nothing local yet.
+        let manifest = ["Bitwig Studio": "Documents/Bitwig Studio"]
 
-        let items = discoverAppSettingsItems(home: home, syncRoot: syncRoot,
-                                             pluginManufacturers: ["FabFilter", "Xfer Records", "FabFilter"])
-        let ids = items.map(\.relativePath)
+        let items = discoverAppSettingsItems(home: home, manifest: manifest, plugins: [
+            (name: "Pro-Q 3", manufacturer: "FabFilter"),
+            (name: "Pro-L 2", manufacturer: "FabFilter"),
+            (name: "Diva", manufacturer: "u-he"),
+            (name: "Valhalla Room", manufacturer: "Valhalla DSP, LLC"),
+            (name: "Pro-Q 3", manufacturer: "FabFilter"),
+        ])
+        func paths(_ owner: String) -> [String] { items.filter { $0.owner == owner }.map(\.relativePath) }
 
-        XCTAssertTrue(ids.contains("Music/Ableton/User Library"))
-        XCTAssertTrue(ids.contains("Documents/Bitwig Studio"))
-        XCTAssertTrue(ids.contains("Library/Preferences/Cubase 13"))
-        XCTAssertTrue(ids.contains("Library/Application Support/FabFilter"))
-        XCTAssertTrue(ids.contains("Documents/Xfer"))
-        XCTAssertFalse(ids.contains("Library/Application Support/Some Other App"))
-        XCTAssertFalse(ids.contains("Library/Application Support/REAPER"))
-        XCTAssertEqual(Set(ids).count, ids.count)
-        XCTAssertEqual(items.first { $0.relativePath == "Documents/Xfer" }?.source, .pluginVendor)
+        XCTAssertEqual(paths("Ableton Live"), ["Music/Ableton/User Library"])
+        XCTAssertEqual(paths("Bitwig Studio"), ["Documents/Bitwig Studio"])
+        XCTAssertEqual(paths("Cubase 13"), ["Library/Preferences/Cubase 13"])
+        // A plugin-named folder inside the vendor's folder wins over the whole vendor folder…
+        XCTAssertEqual(paths("Pro-Q 3"), ["Library/Application Support/FabFilter/Pro-Q 3"])
+        // …otherwise the vendor folder is the plugin's settings location.
+        XCTAssertEqual(paths("Pro-L 2"), ["Library/Application Support/FabFilter"])
+        XCTAssertEqual(paths("Diva"), ["Library/Application Support/u-he"])
+        XCTAssertEqual(paths("Valhalla Room"), ["Library/Preferences/Valhalla Room"])
+        XCTAssertFalse(items.contains { $0.relativePath.hasSuffix("Some Other App") })
+        XCTAssertEqual(items.first { $0.owner == "Diva" }?.source, .plugin)
+    }
+
+    // MARK: Destination layout
+
+    func testNewNameIsTheFolderNameWhenFree() {
+        XCTAssertEqual(newSettingsName(for: "Library/Application Support/u-he", destination: syncRoot, manifest: [:]), "u-he")
+    }
+
+    func testExistingFolderGetsASiblingInsteadOfBeingReused() throws {
+        // A "u-he" folder is already in the destination but isn't recorded as
+        // ours (put there by hand, say): never merge into it.
+        try FileManager.default.createDirectory(at: syncRoot.appendingPathComponent("u-he"), withIntermediateDirectories: true)
+        XCTAssertEqual(newSettingsName(for: "Library/Application Support/u-he", destination: syncRoot, manifest: [:]),
+                       "u-he (Application Support)")
+
+        // Same name from a different place: sibling again, then numbered.
+        let manifest = ["u-he (Application Support)": "Library/Application Support/u-he"]
+        try FileManager.default.createDirectory(at: syncRoot.appendingPathComponent("u-he (Application Support)"),
+                                                withIntermediateDirectories: true)
+        XCTAssertEqual(newSettingsName(for: "Documents/Elsewhere/u-he", destination: syncRoot, manifest: manifest),
+                       "u-he (Elsewhere)")
+        try FileManager.default.createDirectory(at: syncRoot.appendingPathComponent("u-he (Elsewhere)"),
+                                                withIntermediateDirectories: true)
+        XCTAssertEqual(newSettingsName(for: "Documents/Elsewhere/u-he", destination: syncRoot, manifest: manifest),
+                       "u-he 2")
+    }
+
+    func testManifestRoundTripsAndFindsRecordedName() throws {
+        try FileManager.default.createDirectory(at: syncRoot, withIntermediateDirectories: true)
+        let manifest = ["u-he 2": "Library/Application Support/u-he"]
+        try saveSettingsManifest(manifest, destination: syncRoot)
+        XCTAssertEqual(loadSettingsManifest(destination: syncRoot), manifest)
+        XCTAssertEqual(recordedSettingsName(for: "Library/Application Support/u-he", manifest: manifest), "u-he 2")
+        XCTAssertNil(recordedSettingsName(for: "Library/Application Support/Other", manifest: manifest))
     }
 
     // MARK: Link / unlink
 
     func testFirstMacMovesFolderIntoSyncFolderAndLinksBack() throws {
-        let item = AppSettingsItem.custom(relativePath: "Library/Application Support/REAPER")
-        let local = item.localURL(home: home)
-        let remote = item.remoteURL(syncRoot: syncRoot)
+        let local = home.appendingPathComponent("Library/Application Support/REAPER")
+        let remote = syncRoot.appendingPathComponent("REAPER")
         try write("[reaper]", to: local.appendingPathComponent("reaper.ini"))
 
         try linkAppSettings(local: local, toSynced: remote, syncRoot: syncRoot, home: home)
@@ -160,7 +210,7 @@ final class AppSettingsSyncTests: XCTestCase {
         let remote = syncRoot.appendingPathComponent("Documents/Bitwig Studio")
         try write("from other mac", to: remote.appendingPathComponent("prefs"))
         try write("this mac", to: local.appendingPathComponent("prefs"))
-        XCTAssertEqual(appSettingsStatus(local: local, remote: remote), .notSynced(inCloud: true))
+        XCTAssertEqual(appSettingsStatus(local: local, remote: remote), .notSynced(inDestination: true))
 
         try linkAppSettings(local: local, toSynced: remote, syncRoot: syncRoot, home: home)
 
@@ -253,7 +303,7 @@ final class AppSettingsSyncTests: XCTestCase {
         XCTAssertFalse(try isSymlink(local))
         XCTAssertEqual(try contents(of: local.appendingPathComponent("reaper.ini")), "x")
         XCTAssertEqual(try contents(of: remote.appendingPathComponent("reaper.ini")), "x")
-        XCTAssertEqual(appSettingsStatus(local: local, remote: remote), .notSynced(inCloud: true))
+        XCTAssertEqual(appSettingsStatus(local: local, remote: remote), .notSynced(inDestination: true))
     }
 
     func testUnlinkThrowsWhenNotLinked() throws {
@@ -287,37 +337,45 @@ final class AppSettingsSyncManagerTests: XCTestCase {
         super.tearDown()
     }
 
-    func testStatusReflectsProviderChoiceAndAvailability() throws {
+    func testStatusReflectsDestinationChoiceAndAvailability() throws {
         let manager = AppSettingsSyncManager(userDefaults: defaults, home: home)
         let item = knownAppSettingsItems[0]
-        XCTAssertEqual(manager.status(for: item), .noProvider)
+        XCTAssertEqual(manager.status(for: item), .noDestination)
 
-        manager.chooseProvider(.dropbox)
-        XCTAssertEqual(manager.status(for: item), .providerUnavailable)
+        manager.useProvider(.dropbox)
+        XCTAssertNil(manager.destination) // Dropbox isn't set up in this fake home
+        XCTAssertNotNil(manager.lastError)
 
         try FileManager.default.createDirectory(at: home.appendingPathComponent("Dropbox"), withIntermediateDirectories: true)
-        manager.refreshSyncRoot()
-        XCTAssertEqual(manager.syncRoot?.path, home.appendingPathComponent("Dropbox/AudioBunny/App Settings").path)
+        manager.useProvider(.dropbox)
+        XCTAssertEqual(manager.destination?.path, home.appendingPathComponent("Dropbox/AudioBunny Settings").path)
         XCTAssertEqual(manager.status(for: item), .notFound)
+
+        try FileManager.default.removeItem(at: home.appendingPathComponent("Dropbox"))
+        XCTAssertEqual(manager.status(for: item), .destinationMissing)
     }
 
-    func testProviderAndCustomItemsPersist() {
+    func testDestinationAndCustomItemsPersist() {
+        let destination = home.appendingPathComponent("Settings Destination")
         let first = AppSettingsSyncManager(userDefaults: defaults, home: home)
-        first.chooseProvider(.iCloudDrive)
-        XCTAssertTrue(first.addCustomItem(at: home.appendingPathComponent("Library/Application Support/Serum")))
+        first.chooseDestination(destination)
+        XCTAssertTrue(first.addCustomItem(at: home.appendingPathComponent("Library/Application Support/Serum"), owner: "Serum"))
         XCTAssertFalse(first.addCustomItem(at: URL(fileURLWithPath: "/etc/hosts")))
 
         let second = AppSettingsSyncManager(userDefaults: defaults, home: home)
-        XCTAssertEqual(second.provider, .iCloudDrive)
-        XCTAssertEqual(second.customItems.map(\.relativePath), ["Library/Application Support/Serum"])
+        XCTAssertEqual(second.destination?.path, destination.path)
+        XCTAssertEqual(second.items.filter(\.isCustom).map(\.relativePath), ["Library/Application Support/Serum"])
+        XCTAssertEqual(second.items.filter(\.isCustom).map(\.owner), ["Serum"])
     }
 
-    func testEnableAndDisableSyncRoundTrip() async throws {
-        let dropbox = home.appendingPathComponent("Dropbox")
-        try FileManager.default.createDirectory(at: dropbox, withIntermediateDirectories: true)
+    func testEnableAndDisableSyncRoundTripRecordsTheFolder() async throws {
+        let destination = home.appendingPathComponent("Settings Destination")
         let manager = AppSettingsSyncManager(userDefaults: defaults, home: home)
-        manager.chooseProvider(.dropbox)
-        let item = AppSettingsItem.custom(relativePath: "Library/Application Support/REAPER")
+        manager.chooseDestination(destination)
+        // Something unrelated already called "REAPER" is in the destination.
+        try FileManager.default.createDirectory(at: destination.appendingPathComponent("REAPER"),
+                                                withIntermediateDirectories: true)
+        let item = AppSettingsItem.custom(owner: "REAPER", relativePath: "Library/Application Support/REAPER")
         let local = item.localURL(home: home)
         try FileManager.default.createDirectory(at: local, withIntermediateDirectories: true)
         try Data("x".utf8).write(to: local.appendingPathComponent("reaper.ini"))
@@ -325,9 +383,14 @@ final class AppSettingsSyncManagerTests: XCTestCase {
         await manager.enableSync(for: item)
         XCTAssertNil(manager.lastError)
         XCTAssertEqual(manager.status(for: item), .synced)
+        XCTAssertEqual(manager.remoteURL(for: item)?.lastPathComponent, "REAPER (Application Support)")
+        XCTAssertEqual(loadSettingsManifest(destination: destination),
+                       ["REAPER (Application Support)": "Library/Application Support/REAPER"])
+        // The folder that was already there is untouched.
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: destination.appendingPathComponent("REAPER").path), [])
 
         await manager.disableSync(for: item)
         XCTAssertNil(manager.lastError)
-        XCTAssertEqual(manager.status(for: item), .notSynced(inCloud: true))
+        XCTAssertEqual(manager.status(for: item), .notSynced(inDestination: true))
     }
 }

@@ -59,74 +59,74 @@ func dropboxRootCandidates(home: URL) -> [URL] {
     return result
 }
 
-/// The folder AudioBunny owns inside a provider's root. Everything it syncs
-/// goes under here, never loose in the user's Dropbox / iCloud Drive.
-func appSettingsSyncRoot(providerRoot: URL) -> URL {
-    providerRoot.appendingPathComponent("AudioBunny/App Settings")
+/// Where AudioBunny suggests putting settings inside iCloud Drive / Dropbox.
+func suggestedSettingsDestination(providerRoot: URL) -> URL {
+    providerRoot.appendingPathComponent("AudioBunny Settings")
 }
 
 // MARK: - Items
 
-/// One app-settings file or folder that can be synced, identified by its path
-/// relative to the home folder (which is also where it lives inside the sync
-/// root, so every Mac maps it to the same place and nothing can collide).
+/// One settings file or folder that can be moved into the destination folder
+/// and linked back, identified by its path relative to the home folder.
 struct AppSettingsItem: Identifiable, Hashable {
     enum Source: Int, Hashable {
         /// A DAW or audio app from `knownAppSettingsItems`.
         case audioApp
-        /// A vendor folder matched to an installed plugin's manufacturer.
-        case pluginVendor
+        /// A folder found for an installed plugin.
+        case plugin
         /// Added by hand.
         case custom
     }
 
-    let appName: String
+    /// The app or plugin this belongs to — the list groups by it. Several
+    /// plugins from one vendor can share a folder, so the same path can show
+    /// up under more than one owner.
+    let owner: String
     let detail: String
     let relativePath: String
     var source: Source = .audioApp
 
-    var id: String { relativePath }
+    var id: String { "\(owner)|\(relativePath)" }
     var isCustom: Bool { source == .custom }
 
     func localURL(home: URL) -> URL {
         home.appendingPathComponent(relativePath)
     }
 
-    func remoteURL(syncRoot: URL) -> URL {
-        syncRoot.appendingPathComponent(relativePath)
-    }
-
     /// A user-chosen path, named after its last component.
-    static func custom(relativePath: String) -> AppSettingsItem {
-        AppSettingsItem(appName: (relativePath as NSString).lastPathComponent,
+    static func custom(owner: String, relativePath: String) -> AppSettingsItem {
+        AppSettingsItem(owner: owner,
                         detail: "Added by you",
                         relativePath: relativePath,
                         source: .custom)
     }
 }
 
+/// Owner used for items added by hand that don't belong to a plugin.
+let otherSettingsOwner = "Other"
+
 /// Audio apps whose settings live in a folder that's safe to symlink as a
 /// whole: user content and preferences, not licenses or machine-specific
-/// caches. Only the ones present on this Mac (or already in the sync folder)
-/// are shown. Anything else can be added by hand.
+/// caches. Only the ones present on this Mac (or already in the destination)
+/// are shown.
 let knownAppSettingsItems: [AppSettingsItem] = [
-    AppSettingsItem(appName: "Ableton Live", detail: "User Library (presets, templates, defaults)",
+    AppSettingsItem(owner: "Ableton Live", detail: "User Library (presets, templates, defaults)",
                     relativePath: "Music/Ableton/User Library"),
-    AppSettingsItem(appName: "Logic Pro & MainStage", detail: "Patches, channel strips, key commands, templates",
+    AppSettingsItem(owner: "Logic Pro & MainStage", detail: "Patches, channel strips, key commands, templates",
                     relativePath: "Music/Audio Music Apps"),
-    AppSettingsItem(appName: "Bitwig Studio", detail: "Library, templates, controller scripts",
+    AppSettingsItem(owner: "Bitwig Studio", detail: "Library, templates, controller scripts",
                     relativePath: "Documents/Bitwig Studio"),
-    AppSettingsItem(appName: "REAPER", detail: "Preferences, actions, scripts, themes",
+    AppSettingsItem(owner: "REAPER", detail: "Preferences, actions, scripts, themes",
                     relativePath: "Library/Application Support/REAPER"),
-    AppSettingsItem(appName: "FL Studio", detail: "User data, presets, templates",
+    AppSettingsItem(owner: "FL Studio", detail: "User data, presets, templates",
                     relativePath: "Documents/Image-Line"),
-    AppSettingsItem(appName: "Studio One", detail: "User presets, templates, scripts",
+    AppSettingsItem(owner: "Studio One", detail: "User presets, templates, scripts",
                     relativePath: "Documents/Studio One"),
-    AppSettingsItem(appName: "Pro Tools", detail: "Templates, I/O settings",
+    AppSettingsItem(owner: "Pro Tools", detail: "Templates, I/O settings",
                     relativePath: "Documents/Pro Tools"),
-    AppSettingsItem(appName: "Cubase & Nuendo", detail: "User content, templates",
+    AppSettingsItem(owner: "Cubase & Nuendo", detail: "User content, templates",
                     relativePath: "Documents/Steinberg"),
-    AppSettingsItem(appName: "Native Instruments", detail: "User content (Kontakt, Massive X, Komplete Kontrol…)",
+    AppSettingsItem(owner: "Native Instruments", detail: "User content (Kontakt, Massive X, Komplete Kontrol…)",
                     relativePath: "Documents/Native Instruments"),
 ]
 
@@ -137,13 +137,11 @@ let versionedAppSettingsFolders: [(appName: String, parent: String, prefix: Stri
     ("Nuendo", "Library/Preferences", "Nuendo "),
 ]
 
-/// Where plugin vendors keep settings, presets and authorizations-free state.
-/// Each child folder here that matches an installed plugin's manufacturer is
-/// offered for sync.
-let pluginVendorSettingsParents = [
+/// Where plugins keep their settings. (Presets in `~/Documents` and
+/// `~/Library/Audio/Presets` are Preset Sync's job.)
+let pluginSettingsParents = [
     "Library/Application Support",
     "Library/Preferences",
-    "Documents",
 ]
 
 /// Words that vary between how a vendor names itself in a plugin and how it
@@ -171,65 +169,88 @@ func vendorFolderMatches(folderName: String, manufacturer: String) -> Bool {
     return vendorMatchKey(folderName) == key
 }
 
-/// Everything worth offering for sync on this Mac: known audio apps and
-/// versioned DAW preference folders that exist here or in the sync folder,
-/// plus vendor folders that match an installed plugin's manufacturer.
-/// Does filesystem I/O — call off the main thread.
-func discoverAppSettingsItems(home: URL, syncRoot: URL?, pluginManufacturers: [String]) -> [AppSettingsItem] {
-    let fm = FileManager.default
-    func present(_ relativePath: String) -> Bool {
-        let local = home.appendingPathComponent(relativePath)
-        if (try? fm.destinationOfSymbolicLink(atPath: local.path)) != nil { return true }
-        if fm.fileExists(atPath: local.path) { return true }
-        if let syncRoot { return fm.fileExists(atPath: syncRoot.appendingPathComponent(relativePath).path) }
-        return false
+/// Whether a folder is named for a plugin ("Pro-Q 3" ↔ "Pro-Q 3", "Valhalla
+/// Room" ↔ "ValhallaRoom").
+func folderMatchesPluginName(_ folderName: String, pluginName: String) -> Bool {
+    func key(_ s: String) -> String {
+        s.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
     }
-    /// Child folders (or links to folders) of a home-relative parent, here and
-    /// in the sync folder, so a second Mac sees what the first one synced.
-    func childFolders(of parent: String) -> Set<String> {
+    let pluginKey = key(pluginName)
+    return pluginKey.count >= 3 && key(folderName) == pluginKey
+}
+
+/// Everything worth offering on this Mac: known audio apps and versioned DAW
+/// preference folders, plus each installed plugin's settings folders — a
+/// folder named for the plugin, or else its vendor's folder (narrowed to a
+/// plugin-named folder inside it when there is one). Items another Mac
+/// already moved into the destination (per `manifest`) are included even when
+/// nothing is here yet. Does filesystem I/O — call off the main thread.
+func discoverAppSettingsItems(home: URL, manifest: [String: String],
+                              plugins: [(name: String, manufacturer: String)]) -> [AppSettingsItem] {
+    let fm = FileManager.default
+    let syncedPaths = Set(manifest.values)
+
+    func isLink(_ relativePath: String) -> Bool {
+        (try? fm.destinationOfSymbolicLink(atPath: home.appendingPathComponent(relativePath).path)) != nil
+    }
+    func present(_ relativePath: String) -> Bool {
+        isLink(relativePath) || fm.fileExists(atPath: home.appendingPathComponent(relativePath).path)
+            || syncedPaths.contains(relativePath)
+    }
+    /// Child folders of a home-relative folder, here or recorded in the manifest.
+    func childFolders(of parent: String) -> [String] {
         var names = Set<String>()
-        for base in [home, syncRoot].compactMap({ $0 }) {
-            let dir = base.appendingPathComponent(parent)
-            for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where !name.hasPrefix(".") {
-                guard !name.contains("pre-sync backup") else { continue }
-                var isDir: ObjCBool = false
-                if fm.fileExists(atPath: dir.appendingPathComponent(name).path, isDirectory: &isDir), isDir.boolValue {
-                    names.insert(name)
-                }
+        let dir = home.appendingPathComponent(parent)
+        for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+        where !name.hasPrefix(".") && !name.contains("pre-sync backup") {
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: dir.appendingPathComponent(name).path, isDirectory: &isDir), isDir.boolValue {
+                names.insert(name)
             }
         }
-        return names
+        for path in syncedPaths where (path as NSString).deletingLastPathComponent == parent {
+            names.insert((path as NSString).lastPathComponent)
+        }
+        return names.sorted()
     }
 
     var result = knownAppSettingsItems.filter { present($0.relativePath) }
-    var seen = Set(result.map(\.id))
-    var claimedFolders = Set(knownAppSettingsItems.map(\.id))
+    var claimed = Set(knownAppSettingsItems.map(\.relativePath))
 
     for versioned in versionedAppSettingsFolders {
-        for name in childFolders(of: versioned.parent).sorted() where name.hasPrefix(versioned.prefix) {
+        for name in childFolders(of: versioned.parent) where name.hasPrefix(versioned.prefix) {
             let relative = "\(versioned.parent)/\(name)"
-            guard seen.insert(relative).inserted else { continue }
-            claimedFolders.insert(relative)
-            result.append(AppSettingsItem(appName: name, detail: "\(versioned.appName) preferences",
+            guard claimed.insert(relative).inserted else { continue }
+            result.append(AppSettingsItem(owner: name, detail: "\(versioned.appName) preferences",
                                           relativePath: relative))
         }
     }
 
-    let manufacturers = Set(pluginManufacturers.filter { !$0.isEmpty })
-    var vendorItems: [AppSettingsItem] = []
-    for parent in pluginVendorSettingsParents {
-        for name in childFolders(of: parent) {
-            let relative = "\(parent)/\(name)"
-            guard !claimedFolders.contains(relative),
-                  let manufacturer = manufacturers.first(where: { vendorFolderMatches(folderName: name, manufacturer: $0) }),
-                  seen.insert(relative).inserted else { continue }
-            let place = parent == "Documents" ? "Documents" : (parent as NSString).lastPathComponent
-            vendorItems.append(AppSettingsItem(appName: manufacturer, detail: "Plugin settings in \(place)",
-                                               relativePath: relative, source: .pluginVendor))
+    let parentFolders = pluginSettingsParents.map { parent in (parent, childFolders(of: parent)) }
+    var pluginsSeen = Set<String>()
+    for plugin in plugins where pluginsSeen.insert(plugin.name.lowercased()).inserted {
+        var paths: [String] = []
+        for (parent, children) in parentFolders {
+            for name in children {
+                let relative = "\(parent)/\(name)"
+                guard !claimed.contains(relative) else { continue }
+                if folderMatchesPluginName(name, pluginName: plugin.name) {
+                    paths.append(relative)
+                } else if vendorFolderMatches(folderName: name, manufacturer: plugin.manufacturer) {
+                    // A vendor folder that's already linked is synced as a
+                    // whole — don't offer pieces of it.
+                    let inner: [String] = isLink(relative) ? [] : childFolders(of: relative)
+                        .filter { folderMatchesPluginName($0, pluginName: plugin.name) }
+                    paths += inner.isEmpty ? [relative] : inner.map { "\(relative)/\($0)" }
+                }
+            }
         }
-    }
-    result += vendorItems.sorted {
-        ($0.appName.lowercased(), $0.relativePath) < ($1.appName.lowercased(), $1.relativePath)
+        for path in paths {
+            let place = path.hasPrefix("Library/Preferences") ? "Preferences" : "Application Support"
+            result.append(AppSettingsItem(owner: plugin.name,
+                                          detail: "\(plugin.manufacturer) · \(place)",
+                                          relativePath: path, source: .plugin))
+        }
     }
     return result
 }
@@ -297,9 +318,9 @@ enum AppSettingsSyncError: LocalizedError, Equatable {
         case .managedByMacOS:
             return "macOS replaces symlinks there (preference plists and sandboxed app containers), so it can't be synced this way."
         case .overlapsSyncFolder:
-            return "That overlaps the sync folder itself."
+            return "That overlaps the destination folder itself."
         case .nothingToSync:
-            return "There's nothing there yet, on this Mac or in the sync folder."
+            return "There's nothing there yet, on this Mac or in the destination folder."
         case .kindMismatch:
             return "One copy is a file and the other a folder — move one aside and try again."
         case .containsLinks:
@@ -350,7 +371,7 @@ func validateAppSettingsPath(_ local: URL, syncRoot: URL,
 ///
 /// - Already linked to `remote`: no-op. Linked anywhere else: refuses, and the
 ///   caller must remove that link by hand.
-/// - Only a local copy (first Mac): it's *moved* into the sync folder, then
+/// - Only a local copy (first Mac): it's *moved* into the destination folder, then
 ///   linked back — nothing is copied or duplicated.
 /// - Only a synced copy (another Mac already synced it): just links to it.
 /// - Both: the synced copy wins, and this Mac's copy is renamed aside as a
@@ -420,115 +441,195 @@ func unlinkAppSettings(local: URL) throws {
     }
 }
 
+// MARK: - Destination layout
+
+/// Lives in the destination folder and records which home-relative path each
+/// folder there came from, so every Mac links the same path to the same
+/// folder — and so a folder that was already there (put there by hand, or
+/// belonging to some other path with the same name) is never mistaken for
+/// this one and overwritten.
+let settingsManifestFileName = ".audiobunny-settings.json"
+
+/// Folder name in the destination → home-relative path it holds.
+func loadSettingsManifest(destination: URL) -> [String: String] {
+    let url = destination.appendingPathComponent(settingsManifestFileName)
+    guard let data = try? Data(contentsOf: url),
+          let manifest = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+    return manifest
+}
+
+func saveSettingsManifest(_ manifest: [String: String], destination: URL) throws {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try encoder.encode(manifest).write(to: destination.appendingPathComponent(settingsManifestFileName),
+                                       options: .atomic)
+}
+
+/// The destination folder name already recorded for `relativePath`, if any.
+func recordedSettingsName(for relativePath: String, manifest: [String: String]) -> String? {
+    manifest.filter { $0.value == relativePath }.keys.sorted().first
+}
+
+/// A name for `relativePath` in the destination that isn't taken. It's the
+/// folder's own name when free; when a folder by that name is already there,
+/// the new one goes beside it as a sibling — "Name (Parent)", then "Name 2",
+/// "Name 3"… — and the existing folder is left alone.
+func newSettingsName(for relativePath: String, destination: URL, manifest: [String: String]) -> String {
+    let fm = FileManager.default
+    func isFree(_ name: String) -> Bool {
+        let path = destination.appendingPathComponent(name).path
+        return manifest[name] == nil && name != settingsManifestFileName
+            && !fm.fileExists(atPath: path)
+            && (try? fm.destinationOfSymbolicLink(atPath: path)) == nil
+    }
+    let base = (relativePath as NSString).lastPathComponent
+    let parent = ((relativePath as NSString).deletingLastPathComponent as NSString).lastPathComponent
+    var candidates = [base]
+    if !parent.isEmpty { candidates.append("\(base) (\(parent))") }
+    if let free = candidates.first(where: isFree) { return free }
+    var n = 2
+    while !isFree("\(base) \(n)") { n += 1 }
+    return "\(base) \(n)"
+}
+
+// MARK: - Status
+
 enum AppSettingsSyncStatus: Equatable {
-    /// No provider chosen yet.
-    case noProvider
-    /// The chosen provider isn't set up on this Mac.
-    case providerUnavailable
-    /// Nothing on this Mac and nothing in the sync folder — the app probably
+    /// No destination folder chosen yet.
+    case noDestination
+    /// The chosen destination folder isn't there (e.g. an unplugged drive).
+    case destinationMissing
+    /// Nothing on this Mac and nothing in the destination — the app probably
     /// isn't installed here.
     case notFound
-    /// Not linked. `inCloud` means another Mac already synced it, so linking
-    /// will use that copy.
-    case notSynced(inCloud: Bool)
+    /// Not linked. `inDestination` means it's already in the destination
+    /// (another Mac moved it there), so linking uses that copy.
+    case notSynced(inDestination: Bool)
     case synced
-    /// Linked, but not to where the current provider would put it — usually
-    /// left over from another provider choice. Needs manual attention.
+    /// Linked, but not to its folder in the current destination — usually
+    /// left over from another destination. Needs manual attention.
     case linkedElsewhere(String)
 }
 
-func appSettingsStatus(local: URL, remote: URL) -> AppSettingsSyncStatus {
+/// `remote` is the item's folder in the destination if one is recorded.
+func appSettingsStatus(local: URL, remote: URL?) -> AppSettingsSyncStatus {
     let fm = FileManager.default
     if let destPath = try? fm.destinationOfSymbolicLink(atPath: local.path) {
         let existing = URL(fileURLWithPath: destPath).standardizedFileURL.path
-        return existing == remote.standardizedFileURL.path ? .synced : .linkedElsewhere(existing)
+        return existing == remote?.standardizedFileURL.path ? .synced : .linkedElsewhere(existing)
     }
-    let inCloud = fm.fileExists(atPath: remote.path)
-    if !inCloud && !fm.fileExists(atPath: local.path) { return .notFound }
-    return .notSynced(inCloud: inCloud)
+    if let remote, fm.fileExists(atPath: remote.path) { return .notSynced(inDestination: true) }
+    if !fm.fileExists(atPath: local.path) { return .notFound }
+    return .notSynced(inDestination: false)
 }
 
 // MARK: - Manager
 
 @MainActor
 final class AppSettingsSyncManager: ObservableObject {
-    @Published private(set) var provider: CloudSyncProvider?
-    /// The AudioBunny folder inside the chosen provider, or nil if no provider
-    /// is chosen or it isn't set up on this Mac.
-    @Published private(set) var syncRoot: URL?
-    @Published private(set) var customItems: [AppSettingsItem] = []
-    /// Audio apps and plugin vendor folders found on this Mac (or already in
-    /// the sync folder). Empty until `discover` has run.
+    /// The folder settings get moved into — usually inside iCloud Drive or Dropbox.
+    @Published private(set) var destination: URL?
+    /// The destination's record of what it holds; see `settingsManifestFileName`.
+    @Published private(set) var manifest: [String: String] = [:]
+    /// Owner → home-relative paths added by hand.
+    @Published private(set) var customPaths: [String: [String]] = [:]
     @Published private(set) var discoveredItems: [AppSettingsItem] = []
     @Published private(set) var hasDiscovered = false
     @Published private(set) var isDiscovering = false
-    /// On-disk size of each item's local copy, by item id, filled in after
-    /// discovery so the UI can warn before uploading something huge.
+    /// On-disk size of each local item, by home-relative path, so the UI can
+    /// warn before moving something huge.
     @Published private(set) var sizes: [String: Int64] = [:]
     @Published var lastError: String?
-    @Published private(set) var workingIDs: Set<String> = []
+    /// Home-relative paths being linked or unlinked right now.
+    @Published private(set) var workingPaths: Set<String> = []
 
     let home: URL
     private let userDefaults: UserDefaults
-    private let providerDefaultsKey = "audiobunny.appSettingsSync.provider"
-    private let customItemsDefaultsKey = "audiobunny.appSettingsSync.customItems"
+    private let destinationDefaultsKey = "audiobunny.settingsSync.destination"
+    private let customPathsDefaultsKey = "audiobunny.settingsSync.customPaths"
 
     init(userDefaults: UserDefaults = .standard,
          home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.userDefaults = userDefaults
         self.home = home
-        if let raw = userDefaults.string(forKey: providerDefaultsKey) {
-            provider = CloudSyncProvider(rawValue: raw)
+        if let path = userDefaults.string(forKey: destinationDefaultsKey) {
+            destination = URL(fileURLWithPath: path)
         }
-        customItems = (userDefaults.stringArray(forKey: customItemsDefaultsKey) ?? [])
-            .map(AppSettingsItem.custom(relativePath:))
-        refreshSyncRoot()
+        customPaths = userDefaults.dictionary(forKey: customPathsDefaultsKey) as? [String: [String]] ?? [:]
+        reloadManifest()
     }
 
     var items: [AppSettingsItem] {
-        let discovered = Set(discoveredItems.map(\.id))
-        return discoveredItems + customItems.filter { !discovered.contains($0.id) }
+        var seen = Set(discoveredItems.map(\.id))
+        var result = discoveredItems
+        for (owner, paths) in customPaths.sorted(by: { $0.key < $1.key }) {
+            for path in paths {
+                let item = AppSettingsItem.custom(owner: owner, relativePath: path)
+                if seen.insert(item.id).inserted { result.append(item) }
+            }
+        }
+        return result
     }
 
-    /// Finds every audio app and installed plugin vendor with settings to
-    /// sync, then measures them. Pass the manufacturers of every installed
-    /// plugin (duplicates are fine).
-    func discover(pluginManufacturers: [String]) async {
-        refreshSyncRoot()
-        isDiscovering = true
-        let home = self.home
-        let syncRoot = self.syncRoot
-        let found = await Task.detached(priority: .userInitiated) {
-            discoverAppSettingsItems(home: home, syncRoot: syncRoot, pluginManufacturers: pluginManufacturers)
-        }.value
-        discoveredItems = found
-        hasDiscovered = true
-        isDiscovering = false
-
-        let targets = items.map { ($0.id, localURL(for: $0)) }
-        sizes = await Task.detached(priority: .utility) {
-            Dictionary(targets.map { ($0.0, appSettingsDiskSize($0.1)) }, uniquingKeysWith: { a, _ in a })
-        }.value
+    var destinationAvailable: Bool {
+        guard let destination else { return false }
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: destination.path, isDirectory: &isDir) && isDir.boolValue
     }
 
-    /// Re-detects the provider's folder — call when the sync UI appears, since
-    /// Dropbox / iCloud Drive may have been set up since launch.
-    func refreshSyncRoot() {
-        syncRoot = provider?.rootFolder(home: home).map { appSettingsSyncRoot(providerRoot: $0) }
+    func reloadManifest() {
+        manifest = destination.map { loadSettingsManifest(destination: $0) } ?? [:]
+    }
+
+    func chooseDestination(_ url: URL) {
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        } catch {
+            lastError = "Couldn't use \(url.path): \(error.localizedDescription)"
+            return
+        }
+        destination = url
+        userDefaults.set(url.path, forKey: destinationDefaultsKey)
+        lastError = nil
+        reloadManifest()
     }
 
     func isAvailable(_ provider: CloudSyncProvider) -> Bool {
         provider.rootFolder(home: home) != nil
     }
 
-    func chooseProvider(_ newProvider: CloudSyncProvider) {
-        provider = newProvider
-        userDefaults.set(newProvider.rawValue, forKey: providerDefaultsKey)
-        refreshSyncRoot()
+    /// Points the destination at an "AudioBunny Settings" folder in iCloud
+    /// Drive or Dropbox.
+    func useProvider(_ provider: CloudSyncProvider) {
+        guard let root = provider.rootFolder(home: home) else {
+            lastError = "\(provider.displayName) isn't set up on this Mac."
+            return
+        }
+        chooseDestination(suggestedSettingsDestination(providerRoot: root))
     }
 
-    /// Switching providers would strand every existing link (they'd all show
-    /// "linked elsewhere"), so the UI locks the choice while anything is synced.
+    /// Finds every audio app and installed plugin with settings, then measures
+    /// them. Pass every installed plugin (format duplicates are fine).
+    func discover(plugins: [(name: String, manufacturer: String)]) async {
+        reloadManifest()
+        isDiscovering = true
+        let home = self.home
+        let manifest = self.manifest
+        let found = await Task.detached(priority: .userInitiated) {
+            discoverAppSettingsItems(home: home, manifest: manifest, plugins: plugins)
+        }.value
+        discoveredItems = found
+        hasDiscovered = true
+        isDiscovering = false
+
+        let targets = Set(items.map(\.relativePath)).map { ($0, home.appendingPathComponent($0)) }
+        sizes = await Task.detached(priority: .utility) {
+            Dictionary(uniqueKeysWithValues: targets.map { ($0.0, appSettingsDiskSize($0.1)) })
+        }.value
+    }
+
+    /// Switching destinations would strand every existing link, so the UI
+    /// locks the choice while anything is linked.
     var hasSyncedItems: Bool {
         items.contains {
             switch status(for: $0) {
@@ -540,75 +641,94 @@ final class AppSettingsSyncManager: ObservableObject {
 
     func localURL(for item: AppSettingsItem) -> URL { item.localURL(home: home) }
 
-    func status(for item: AppSettingsItem) -> AppSettingsSyncStatus {
-        guard provider != nil else { return .noProvider }
-        guard let syncRoot else { return .providerUnavailable }
-        return appSettingsStatus(local: localURL(for: item), remote: item.remoteURL(syncRoot: syncRoot))
+    func remoteURL(for item: AppSettingsItem) -> URL? {
+        guard let destination, let name = recordedSettingsName(for: item.relativePath, manifest: manifest) else {
+            return nil
+        }
+        return destination.appendingPathComponent(name)
     }
 
-    func isWorking(_ item: AppSettingsItem) -> Bool { workingIDs.contains(item.id) }
+    func status(for item: AppSettingsItem) -> AppSettingsSyncStatus {
+        guard destination != nil else { return .noDestination }
+        guard destinationAvailable else { return .destinationMissing }
+        return appSettingsStatus(local: localURL(for: item), remote: remoteURL(for: item))
+    }
+
+    func isWorking(_ item: AppSettingsItem) -> Bool { workingPaths.contains(item.relativePath) }
 
     @discardableResult
-    func addCustomItem(at url: URL) -> Bool {
+    func addCustomItem(at url: URL, owner: String = otherSettingsOwner) -> Bool {
         guard let relative = homeRelativePath(of: url, home: home) else {
             lastError = AppSettingsSyncError.unsafePath.errorDescription
             return false
         }
-        if let syncRoot {
+        if let destination {
             do {
-                try validateAppSettingsPath(url, syncRoot: syncRoot, home: home)
+                try validateAppSettingsPath(url, syncRoot: destination, home: home)
             } catch {
                 lastError = error.localizedDescription
                 return false
             }
         }
-        guard !items.contains(where: { $0.id == relative }) else { return true }
-        customItems.append(.custom(relativePath: relative))
-        persistCustomItems()
+        var paths = customPaths[owner] ?? []
+        if !paths.contains(relative) && !items.contains(where: { $0.owner == owner && $0.relativePath == relative }) {
+            paths.append(relative)
+            customPaths[owner] = paths
+            userDefaults.set(customPaths, forKey: customPathsDefaultsKey)
+        }
         lastError = nil
         return true
     }
 
     func removeCustomItem(_ item: AppSettingsItem) {
-        customItems.removeAll { $0.id == item.id }
-        persistCustomItems()
-    }
-
-    private func persistCustomItems() {
-        userDefaults.set(customItems.map(\.relativePath), forKey: customItemsDefaultsKey)
+        customPaths[item.owner]?.removeAll { $0 == item.relativePath }
+        if customPaths[item.owner]?.isEmpty == true { customPaths[item.owner] = nil }
+        userDefaults.set(customPaths, forKey: customPathsDefaultsKey)
     }
 
     func enableSync(for item: AppSettingsItem) async {
-        guard let syncRoot else {
-            lastError = "Choose iCloud Drive or Dropbox first."
+        guard let destination, destinationAvailable else {
+            lastError = "Choose a destination folder first."
             return
         }
+        // Another Mac may have added to the destination since we last looked.
+        reloadManifest()
+        let relative = item.relativePath
+        let name = recordedSettingsName(for: relative, manifest: manifest)
+            ?? newSettingsName(for: relative, destination: destination, manifest: manifest)
         let local = localURL(for: item)
-        let remote = item.remoteURL(syncRoot: syncRoot)
+        let remote = destination.appendingPathComponent(name)
         let home = self.home
-        workingIDs.insert(item.id)
-        defer { workingIDs.remove(item.id) }
+        workingPaths.insert(relative)
+        defer { workingPaths.remove(relative) }
         do {
             try await Task.detached(priority: .userInitiated) {
-                try linkAppSettings(local: local, toSynced: remote, syncRoot: syncRoot, home: home)
+                try linkAppSettings(local: local, toSynced: remote, syncRoot: destination, home: home)
             }.value
+            var updated = loadSettingsManifest(destination: destination)
+            updated[name] = relative
+            try saveSettingsManifest(updated, destination: destination)
+            manifest = updated
             lastError = nil
         } catch {
-            lastError = "Couldn't sync \(item.appName): \(error.localizedDescription)"
+            lastError = "Couldn't sync \(item.owner): \(error.localizedDescription)"
         }
     }
 
+    /// Leaves the destination's copy (and its manifest entry) in place — other
+    /// Macs may still be linked to it.
     func disableSync(for item: AppSettingsItem) async {
         let local = localURL(for: item)
-        workingIDs.insert(item.id)
-        defer { workingIDs.remove(item.id) }
+        let relative = item.relativePath
+        workingPaths.insert(relative)
+        defer { workingPaths.remove(relative) }
         do {
             try await Task.detached(priority: .userInitiated) {
                 try unlinkAppSettings(local: local)
             }.value
             lastError = nil
         } catch {
-            lastError = "Couldn't stop syncing \(item.appName): \(error.localizedDescription)"
+            lastError = "Couldn't stop syncing \(item.owner): \(error.localizedDescription)"
         }
     }
 }
