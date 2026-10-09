@@ -123,13 +123,20 @@ final class AppSettingsSyncTests: XCTestCase {
         // Moved into the destination from another Mac; nothing local yet.
         let manifest = ["Bitwig Studio": "Documents/Bitwig Studio"]
 
+        let catalog = SettingsCatalog(version: 1, apps: [
+            .init(name: "Ableton Live", detail: "User Library", paths: ["Music/Ableton/User Library"]),
+            .init(name: "Bitwig Studio", detail: "Library", paths: ["Documents/Bitwig Studio"]),
+            .init(name: "REAPER", detail: "Settings", paths: ["Library/Application Support/REAPER"]),
+            .init(name: "Cubase", detail: "Cubase preferences",
+                  versionedFolders: [.init(parent: "Library/Preferences", prefix: "Cubase ")]),
+        ], pluginVendors: [])
         let items = discoverAppSettingsItems(home: home, manifest: manifest, plugins: [
             (name: "Pro-Q 3", manufacturer: "FabFilter"),
             (name: "Pro-L 2", manufacturer: "FabFilter"),
             (name: "Diva", manufacturer: "u-he"),
             (name: "Valhalla Room", manufacturer: "Valhalla DSP, LLC"),
             (name: "Pro-Q 3", manufacturer: "FabFilter"),
-        ])
+        ], catalog: catalog)
         func paths(_ owner: String) -> [String] { items.filter { $0.owner == owner }.map(\.relativePath) }
 
         XCTAssertEqual(paths("Ableton Live"), ["Music/Ableton/User Library"])
@@ -143,6 +150,44 @@ final class AppSettingsSyncTests: XCTestCase {
         XCTAssertEqual(paths("Valhalla Room"), ["Library/Preferences/Valhalla Room"])
         XCTAssertFalse(items.contains { $0.relativePath.hasSuffix("Some Other App") })
         XCTAssertEqual(items.first { $0.owner == "Diva" }?.source, .plugin)
+    }
+
+    func testCatalogVendorLocationsWinOverSearching() throws {
+        let fm = FileManager.default
+        for path in ["Library/Application Support/Valhalla DSP, LLC/ValhallaRoom",
+                     "Library/Preferences/ValhallaRoom",
+                     "Library/Application Support/u-he"] {
+            try fm.createDirectory(at: home.appendingPathComponent(path), withIntermediateDirectories: true)
+        }
+        let catalog = SettingsCatalog(version: 1, apps: [], pluginVendors: [
+            .init(manufacturer: "Valhalla DSP", detail: "Valhalla settings",
+                  paths: ["Library/Application Support/Valhalla DSP, LLC/{plugin}"]),
+            // Listed, but nothing there: falls back to searching.
+            .init(manufacturer: "u-he", paths: ["Library/Application Support/u-he/Nope"]),
+        ])
+        let items = discoverAppSettingsItems(home: home, manifest: [:], plugins: [
+            (name: "ValhallaRoom", manufacturer: "Valhalla DSP, LLC"),
+            (name: "Diva", manufacturer: "u-he"),
+        ], catalog: catalog)
+
+        XCTAssertEqual(items.filter { $0.owner == "ValhallaRoom" }.map(\.relativePath),
+                       ["Library/Application Support/Valhalla DSP, LLC/ValhallaRoom"])
+        XCTAssertEqual(items.first { $0.owner == "ValhallaRoom" }?.detail, "Valhalla settings")
+        XCTAssertEqual(items.filter { $0.owner == "Diva" }.map(\.relativePath), ["Library/Application Support/u-he"])
+    }
+
+    func testBundledCatalogLoadsAndOnlyListsSyncablePaths() throws {
+        let catalog = SettingsCatalog.bundled
+        XCTAssertGreaterThan(catalog.version, 0)
+        XCTAssertFalse(catalog.apps.isEmpty)
+        let destination = home.appendingPathComponent("Destination")
+        let paths = catalog.appItems.map(\.relativePath)
+            + catalog.pluginVendors.flatMap(\.paths).map { $0.replacingOccurrences(of: "{plugin}", with: "Plugin") }
+        for path in paths {
+            XCTAssertFalse(path.hasPrefix("/") || path.hasPrefix("~"), "\(path) must be relative to home")
+            XCTAssertNoThrow(try validateAppSettingsPath(home.appendingPathComponent(path), syncRoot: destination, home: home),
+                             "\(path) can't be synced")
+        }
     }
 
     // MARK: Destination layout
@@ -339,7 +384,7 @@ final class AppSettingsSyncManagerTests: XCTestCase {
 
     func testStatusReflectsDestinationChoiceAndAvailability() throws {
         let manager = AppSettingsSyncManager(userDefaults: defaults, home: home)
-        let item = knownAppSettingsItems[0]
+        let item = SettingsCatalog.bundled.appItems[0]
         XCTAssertEqual(manager.status(for: item), .noDestination)
 
         manager.useProvider(.dropbox)

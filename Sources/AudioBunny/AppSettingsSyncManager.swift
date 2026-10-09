@@ -70,7 +70,7 @@ func suggestedSettingsDestination(providerRoot: URL) -> URL {
 /// and linked back, identified by its path relative to the home folder.
 struct AppSettingsItem: Identifiable, Hashable {
     enum Source: Int, Hashable {
-        /// A DAW or audio app from `knownAppSettingsItems`.
+        /// A DAW or audio app from `SettingsCatalog.json`.
         case audioApp
         /// A folder found for an installed plugin.
         case plugin
@@ -105,37 +105,66 @@ struct AppSettingsItem: Identifiable, Hashable {
 /// Owner used for items added by hand that don't belong to a plugin.
 let otherSettingsOwner = "Other"
 
-/// Audio apps whose settings live in a folder that's safe to symlink as a
-/// whole: user content and preferences, not licenses or machine-specific
-/// caches. Only the ones present on this Mac (or already in the destination)
-/// are shown.
-let knownAppSettingsItems: [AppSettingsItem] = [
-    AppSettingsItem(owner: "Ableton Live", detail: "User Library (presets, templates, defaults)",
-                    relativePath: "Music/Ableton/User Library"),
-    AppSettingsItem(owner: "Logic Pro & MainStage", detail: "Patches, channel strips, key commands, templates",
-                    relativePath: "Music/Audio Music Apps"),
-    AppSettingsItem(owner: "Bitwig Studio", detail: "Library, templates, controller scripts",
-                    relativePath: "Documents/Bitwig Studio"),
-    AppSettingsItem(owner: "REAPER", detail: "Preferences, actions, scripts, themes",
-                    relativePath: "Library/Application Support/REAPER"),
-    AppSettingsItem(owner: "FL Studio", detail: "User data, presets, templates",
-                    relativePath: "Documents/Image-Line"),
-    AppSettingsItem(owner: "Studio One", detail: "User presets, templates, scripts",
-                    relativePath: "Documents/Studio One"),
-    AppSettingsItem(owner: "Pro Tools", detail: "Templates, I/O settings",
-                    relativePath: "Documents/Pro Tools"),
-    AppSettingsItem(owner: "Cubase & Nuendo", detail: "User content, templates",
-                    relativePath: "Documents/Steinberg"),
-    AppSettingsItem(owner: "Native Instruments", detail: "User content (Kontakt, Massive X, Komplete Kontrol…)",
-                    relativePath: "Documents/Native Instruments"),
-]
+// MARK: - Catalog
 
-/// Versioned settings folders: every child of `parent` whose name starts with
-/// `prefix` is its own item (e.g. `~/Library/Preferences/Cubase 13`).
-let versionedAppSettingsFolders: [(appName: String, parent: String, prefix: String)] = [
-    ("Cubase", "Library/Preferences", "Cubase "),
-    ("Nuendo", "Library/Preferences", "Nuendo "),
-]
+/// The known settings locations for audio apps and plugin vendors, loaded
+/// from `SettingsCatalog.json` (checked into the repo — edit that file to add
+/// an app or plugin). All paths are relative to the home folder.
+struct SettingsCatalog: Codable, Equatable {
+    struct App: Codable, Equatable {
+        let name: String
+        let detail: String
+        /// Fixed locations, e.g. "Music/Ableton/User Library".
+        var paths: [String]?
+        /// Version-numbered folders: every child of `parent` whose name starts
+        /// with `prefix` (e.g. "Library/Preferences/Cubase 13").
+        var versionedFolders: [VersionedFolder]?
+    }
+
+    struct VersionedFolder: Codable, Equatable {
+        let parent: String
+        let prefix: String
+    }
+
+    /// Where one plugin maker keeps its plugins' settings. `{plugin}` in a
+    /// path is replaced by each installed plugin's name.
+    struct PluginVendor: Codable, Equatable {
+        let manufacturer: String
+        var detail: String?
+        let paths: [String]
+    }
+
+    let version: Int
+    let apps: [App]
+    let pluginVendors: [PluginVendor]
+
+    static let empty = SettingsCatalog(version: 0, apps: [], pluginVendors: [])
+
+    /// The copy bundled with the app.
+    static let bundled: SettingsCatalog = {
+        guard let url = Bundle.module.url(forResource: "SettingsCatalog", withExtension: "json"),
+              let data = try? Data(contentsOf: url),
+              let catalog = try? JSONDecoder().decode(SettingsCatalog.self, from: data) else {
+            print("SettingsCatalog.json missing or invalid — settings discovery falls back to searching")
+            return .empty
+        }
+        return catalog
+    }()
+
+    /// Every fixed app location as an item.
+    var appItems: [AppSettingsItem] {
+        apps.flatMap { app in
+            (app.paths ?? []).map { AppSettingsItem(owner: app.name, detail: app.detail, relativePath: $0) }
+        }
+    }
+
+    /// The catalog entry for a plugin's manufacturer, if there is one.
+    func vendor(for manufacturer: String) -> PluginVendor? {
+        let key = vendorMatchKey(manufacturer)
+        guard !key.isEmpty else { return nil }
+        return pluginVendors.first { vendorMatchKey($0.manufacturer) == key }
+    }
+}
 
 /// Where plugins keep their settings. (Presets in `~/Documents` and
 /// `~/Library/Audio/Presets` are Preset Sync's job.)
@@ -179,14 +208,16 @@ func folderMatchesPluginName(_ folderName: String, pluginName: String) -> Bool {
     return pluginKey.count >= 3 && key(folderName) == pluginKey
 }
 
-/// Everything worth offering on this Mac: known audio apps and versioned DAW
-/// preference folders, plus each installed plugin's settings folders — a
+/// Everything worth offering on this Mac: the catalog's audio apps and
+/// versioned DAW preference folders, plus each installed plugin's settings
+/// folders — the catalog's locations for its maker when present, else a
 /// folder named for the plugin, or else its vendor's folder (narrowed to a
 /// plugin-named folder inside it when there is one). Items another Mac
 /// already moved into the destination (per `manifest`) are included even when
 /// nothing is here yet. Does filesystem I/O — call off the main thread.
 func discoverAppSettingsItems(home: URL, manifest: [String: String],
-                              plugins: [(name: String, manufacturer: String)]) -> [AppSettingsItem] {
+                              plugins: [(name: String, manufacturer: String)],
+                              catalog: SettingsCatalog = .bundled) -> [AppSettingsItem] {
     let fm = FileManager.default
     let syncedPaths = Set(manifest.values)
 
@@ -214,21 +245,38 @@ func discoverAppSettingsItems(home: URL, manifest: [String: String],
         return names.sorted()
     }
 
-    var result = knownAppSettingsItems.filter { present($0.relativePath) }
-    var claimed = Set(knownAppSettingsItems.map(\.relativePath))
+    let appItems = catalog.appItems
+    var result = appItems.filter { present($0.relativePath) }
+    var claimed = Set(appItems.map(\.relativePath))
 
-    for versioned in versionedAppSettingsFolders {
-        for name in childFolders(of: versioned.parent) where name.hasPrefix(versioned.prefix) {
-            let relative = "\(versioned.parent)/\(name)"
-            guard claimed.insert(relative).inserted else { continue }
-            result.append(AppSettingsItem(owner: name, detail: "\(versioned.appName) preferences",
-                                          relativePath: relative))
+    for app in catalog.apps {
+        for versioned in app.versionedFolders ?? [] {
+            for name in childFolders(of: versioned.parent) where name.hasPrefix(versioned.prefix) {
+                let relative = "\(versioned.parent)/\(name)"
+                guard claimed.insert(relative).inserted else { continue }
+                result.append(AppSettingsItem(owner: name, detail: app.detail, relativePath: relative))
+            }
         }
     }
 
     let parentFolders = pluginSettingsParents.map { parent in (parent, childFolders(of: parent)) }
     var pluginsSeen = Set<String>()
     for plugin in plugins where pluginsSeen.insert(plugin.name.lowercased()).inserted {
+        // The catalog's locations for this plugin's maker win when any of them is here.
+        if let vendor = catalog.vendor(for: plugin.manufacturer) {
+            let catalogPaths = vendor.paths
+                .map { $0.replacingOccurrences(of: "{plugin}", with: plugin.name) }
+                .filter { !claimed.contains($0) && present($0) }
+            if !catalogPaths.isEmpty {
+                for path in catalogPaths {
+                    result.append(AppSettingsItem(owner: plugin.name,
+                                                  detail: vendor.detail ?? "\(plugin.manufacturer) settings",
+                                                  relativePath: path, source: .plugin))
+                }
+                continue
+            }
+        }
+        // Otherwise search: a folder named for the plugin, or its maker's folder.
         var paths: [String] = []
         for (parent, children) in parentFolders {
             for name in children {

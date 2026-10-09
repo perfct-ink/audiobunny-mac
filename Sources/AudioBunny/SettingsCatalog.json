@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "apps": [
+    {
+      "name": "Ableton Live",
+      "detail": "User Library (presets, templates, defaults)",
+      "paths": ["Music/Ableton/User Library"]
+    },
+    {
+      "name": "Logic Pro & MainStage",
+      "detail": "Patches, channel strips, key commands, templates",
+      "paths": ["Music/Audio Music Apps"]
+    },
+    {
+      "name": "Bitwig Studio",
+      "detail": "Library, templates, controller scripts",
+      "paths": ["Documents/Bitwig Studio"]
+    },
+    {
+      "name": "REAPER",
+      "detail": "Preferences, actions, scripts, themes",
+      "paths": ["Library/Application Support/REAPER"]
+    },
+    {
+      "name": "FL Studio",
+      "detail": "User data, presets, templates",
+      "paths": ["Documents/Image-Line"]
+    },
+    {
+      "name": "Studio One",
+      "detail": "User presets, templates, scripts",
+      "paths": ["Documents/Studio One"]
+    },
+    {
+      "name": "Pro Tools",
+      "detail": "Templates, I/O settings",
+      "paths": ["Documents/Pro Tools"]
+    },
+    {
+      "name": "Cubase & Nuendo",
+      "detail": "User content, templates",
+      "paths": ["Documents/Steinberg"]
+    },
+    {
+      "name": "Cubase",
+      "detail": "Cubase preferences",
+      "versionedFolders": [{ "parent": "Library/Preferences", "prefix": "Cubase " }]
+    },
+    {
+      "name": "Nuendo",
+      "detail": "Nuendo preferences",
+      "versionedFolders": [{ "parent": "Library/Preferences", "prefix": "Nuendo " }]
+    },
+    {
+      "name": "Native Instruments",
+      "detail": "User content (Kontakt, Massive X, Komplete Kontrol…)",
+      "paths": ["Documents/Native Instruments"]
+    }
+  ],
+  "pluginVendors": [
+    {
+      "manufacturer": "u-he",
+      "paths": ["Library/Application Support/u-he"]
+    },
+    {
+      "manufacturer": "Valhalla DSP",
+      "paths": ["Library/Application Support/Valhalla DSP, LLC/{plugin}"]
+    },
+    {
+      "manufacturer": "Native Instruments",
+      "paths": ["Library/Application Support/Native Instruments/{plugin}"]
+    }
+  ]
+}

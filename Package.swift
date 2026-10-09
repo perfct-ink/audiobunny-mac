@@ -9,7 +9,8 @@ let package = Package(
             name: "AudioBunny",
             path: "Sources/AudioBunny",
             resources: [
-                .process("PluginCatalog.json")
+                .process("PluginCatalog.json"),
+                .process("SettingsCatalog.json")
             ],
             swiftSettings: [
                 .unsafeFlags(["-parse-as-library"])
