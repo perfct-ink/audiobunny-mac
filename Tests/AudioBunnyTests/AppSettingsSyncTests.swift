@@ -190,6 +190,15 @@ final class AppSettingsSyncTests: XCTestCase {
         }
     }
 
+    func testCatalogCacheRoundTrips() throws {
+        let url = home.appendingPathComponent("Cache/SettingsCatalog.json")
+        XCTAssertNil(SettingsCatalog.loadCached(from: url))
+        let catalog = SettingsCatalog(version: 7, apps: [.init(name: "X", detail: "Y", paths: ["Documents/X"])],
+                                      pluginVendors: [.init(manufacturer: "u-he", paths: ["Library/Application Support/u-he"])])
+        try catalog.saveCache(to: url)
+        XCTAssertEqual(SettingsCatalog.loadCached(from: url), catalog)
+    }
+
     // MARK: Destination layout
 
     func testNewNameIsTheFolderNameWhenFree() {

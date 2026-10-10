@@ -72,6 +72,13 @@ enum APIClient {
         return response
     }
 
+    // MARK: - Settings catalog
+
+    /// Where audio apps and plugin makers keep their settings (see SettingsCatalog.json).
+    static func settingsCatalog() async throws -> SettingsCatalog {
+        try await get("settings_catalog")
+    }
+
     // MARK: - Computers / sync
 
     static func registerComputer(name: String) async throws -> APIComputer {

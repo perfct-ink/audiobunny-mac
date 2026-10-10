@@ -140,7 +140,25 @@ struct SettingsCatalog: Codable, Equatable {
 
     static let empty = SettingsCatalog(version: 0, apps: [], pluginVendors: [])
 
-    /// The copy bundled with the app.
+    /// Where the last catalog fetched from the web app is kept, so new
+    /// locations survive a relaunch without network.
+    static var cacheURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AudioBunny/SettingsCatalog.json")
+    }
+
+    static func loadCached(from url: URL = cacheURL) -> SettingsCatalog? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(SettingsCatalog.self, from: data)
+    }
+
+    func saveCache(to url: URL = SettingsCatalog.cacheURL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(self).write(to: url, options: .atomic)
+    }
+
+    /// The copy bundled with the app — used until the web app's copy has
+    /// been fetched once, and whenever it can't be.
     static let bundled: SettingsCatalog = {
         guard let url = Bundle.module.url(forResource: "SettingsCatalog", withExtension: "json"),
               let data = try? Data(contentsOf: url),
@@ -582,6 +600,9 @@ final class AppSettingsSyncManager: ObservableObject {
     /// Owner → home-relative paths added by hand.
     @Published private(set) var customPaths: [String: [String]] = [:]
     @Published private(set) var discoveredItems: [AppSettingsItem] = []
+    /// Known settings locations: the web app's copy (fetched, or cached from
+    /// the last fetch), else the one bundled with the app.
+    @Published private(set) var catalog: SettingsCatalog
     @Published private(set) var hasDiscovered = false
     @Published private(set) var isDiscovering = false
     /// On-disk size of each local item, by home-relative path, so the UI can
@@ -600,6 +621,7 @@ final class AppSettingsSyncManager: ObservableObject {
          home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.userDefaults = userDefaults
         self.home = home
+        catalog = SettingsCatalog.loadCached() ?? .bundled
         if let path = userDefaults.string(forKey: destinationDefaultsKey) {
             destination = URL(fileURLWithPath: path)
         }
@@ -659,12 +681,22 @@ final class AppSettingsSyncManager: ObservableObject {
     /// Finds every audio app and installed plugin with settings, then measures
     /// them. Pass every installed plugin (format duplicates are fine).
     func discover(plugins: [(name: String, manufacturer: String)]) async {
+        await runDiscovery(plugins: plugins)
+        // Fetch the web app's catalog after showing results from the one we
+        // have, so a slow or offline server never holds up the list.
+        if await refreshCatalog() {
+            await runDiscovery(plugins: plugins)
+        }
+    }
+
+    private func runDiscovery(plugins: [(name: String, manufacturer: String)]) async {
         reloadManifest()
         isDiscovering = true
         let home = self.home
         let manifest = self.manifest
+        let catalog = self.catalog
         let found = await Task.detached(priority: .userInitiated) {
-            discoverAppSettingsItems(home: home, manifest: manifest, plugins: plugins)
+            discoverAppSettingsItems(home: home, manifest: manifest, plugins: plugins, catalog: catalog)
         }.value
         discoveredItems = found
         hasDiscovered = true
@@ -674,6 +706,18 @@ final class AppSettingsSyncManager: ObservableObject {
         sizes = await Task.detached(priority: .utility) {
             Dictionary(uniqueKeysWithValues: targets.map { ($0.0, appSettingsDiskSize($0.1)) })
         }.value
+    }
+
+    /// Pulls the latest catalog from the web app (GET settings_catalog) and
+    /// caches it. Offline or on any error, keeps whatever it already has.
+    /// Returns whether the catalog changed.
+    @discardableResult
+    func refreshCatalog() async -> Bool {
+        guard let fetched = try? await APIClient.settingsCatalog(), fetched.version > 0 else { return false }
+        try? fetched.saveCache()
+        guard fetched != catalog else { return false }
+        catalog = fetched
+        return true
     }
 
     /// Switching destinations would strand every existing link, so the UI
