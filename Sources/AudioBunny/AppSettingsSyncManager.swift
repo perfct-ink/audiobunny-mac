@@ -107,8 +107,10 @@ let otherSettingsOwner = "Other"
 
 // MARK: - Catalog
 
-/// The known settings locations for audio apps and plugin vendors, loaded
-/// from `SettingsCatalog.json` (checked into the repo — edit that file to add
+/// Global, non-user data: where each audio app and plugin vendor keeps its
+/// settings. (Each user's own choices are `SettingsSyncPrefs`.) Served by the
+/// web app at GET /api/v1/settings_catalog, with a bundled fallback in
+/// `SettingsCatalog.json` (checked into the repo — edit that file to add
 /// an app or plugin). All paths are relative to the home folder.
 struct SettingsCatalog: Codable, Equatable {
     struct App: Codable, Equatable {
@@ -589,6 +591,51 @@ func appSettingsStatus(local: URL, remote: URL?) -> AppSettingsSyncStatus {
     return .notSynced(inDestination: false)
 }
 
+// MARK: - The user's own choices
+
+/// What one user chose in Settings Sync — the per-user counterpart to the
+/// global `SettingsCatalog`. Kept in UserDefaults on each Mac and, when signed
+/// in, mirrored to the account's settings (GET/PATCH /api/v1/settings) so the
+/// user's other Macs start from the same choices. Which items are actually
+/// linked is per-Mac (the symlinks) and lives in the destination's manifest,
+/// not here.
+struct SettingsSyncPrefs: Codable, Equatable {
+    /// "~/…" when inside the home folder (so it means the same place on every
+    /// Mac), otherwise an absolute path.
+    var destination: String?
+    /// Folders and files the user added by hand, as "owner<TAB>home-relative path"
+    /// (account settings only hold strings and arrays of strings).
+    var customPaths: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case destination = "settingsSync.destination"
+        case customPaths = "settingsSync.customPaths"
+    }
+
+    static func encodeDestination(_ url: URL, home: URL) -> String {
+        homeRelativePath(of: url, home: home).map { "~/\($0)" } ?? url.standardizedFileURL.path
+    }
+
+    static func decodeDestination(_ string: String, home: URL) -> URL {
+        string.hasPrefix("~/") ? home.appendingPathComponent(String(string.dropFirst(2)))
+                               : URL(fileURLWithPath: string)
+    }
+
+    static func encodeCustomPaths(_ paths: [String: [String]]) -> [String] {
+        paths.keys.sorted().flatMap { owner in paths[owner, default: []].map { "\(owner)\t\($0)" } }
+    }
+
+    static func decodeCustomPaths(_ entries: [String]) -> [String: [String]] {
+        var result: [String: [String]] = [:]
+        for entry in entries {
+            let parts = entry.split(separator: "\t", maxSplits: 1).map(String.init)
+            guard parts.count == 2, !parts[1].hasPrefix("/"), !parts[1].contains("..") else { continue }
+            result[parts[0], default: []].append(parts[1])
+        }
+        return result
+    }
+}
+
 // MARK: - Manager
 
 @MainActor
@@ -617,10 +664,16 @@ final class AppSettingsSyncManager: ObservableObject {
     private let destinationDefaultsKey = "audiobunny.settingsSync.destination"
     private let customPathsDefaultsKey = "audiobunny.settingsSync.customPaths"
 
+    /// Whether to mirror the user's choices to their account when signed in
+    /// (off in tests, so they never touch a real account).
+    private let syncsToAccount: Bool
+
     init(userDefaults: UserDefaults = .standard,
-         home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+         home: URL = FileManager.default.homeDirectoryForCurrentUser,
+         syncsToAccount: Bool = true) {
         self.userDefaults = userDefaults
         self.home = home
+        self.syncsToAccount = syncsToAccount
         catalog = SettingsCatalog.loadCached() ?? .bundled
         if let path = userDefaults.string(forKey: destinationDefaultsKey) {
             destination = URL(fileURLWithPath: path)
@@ -652,6 +705,11 @@ final class AppSettingsSyncManager: ObservableObject {
     }
 
     func chooseDestination(_ url: URL) {
+        setDestination(url)
+        pushAccountPrefs()
+    }
+
+    private func setDestination(_ url: URL) {
         do {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         } catch {
@@ -682,9 +740,12 @@ final class AppSettingsSyncManager: ObservableObject {
     /// them. Pass every installed plugin (format duplicates are fine).
     func discover(plugins: [(name: String, manufacturer: String)]) async {
         await runDiscovery(plugins: plugins)
-        // Fetch the web app's catalog after showing results from the one we
-        // have, so a slow or offline server never holds up the list.
-        if await refreshCatalog() {
+        // Fetch the account's choices and the web app's catalog after showing
+        // results from what's here, so a slow or offline server never holds
+        // up the list.
+        let accountChanged = await pullAccountPrefs()
+        let catalogChanged = await refreshCatalog()
+        if accountChanged || catalogChanged {
             await runDiscovery(plugins: plugins)
         }
     }
@@ -767,6 +828,7 @@ final class AppSettingsSyncManager: ObservableObject {
             paths.append(relative)
             customPaths[owner] = paths
             userDefaults.set(customPaths, forKey: customPathsDefaultsKey)
+            pushAccountPrefs()
         }
         lastError = nil
         return true
@@ -776,6 +838,64 @@ final class AppSettingsSyncManager: ObservableObject {
         customPaths[item.owner]?.removeAll { $0 == item.relativePath }
         if customPaths[item.owner]?.isEmpty == true { customPaths[item.owner] = nil }
         userDefaults.set(customPaths, forKey: customPathsDefaultsKey)
+        pushAccountPrefs()
+    }
+
+    // MARK: Account
+
+    /// This Mac's choices, in the shape stored on the account.
+    var prefs: SettingsSyncPrefs {
+        SettingsSyncPrefs(destination: destination.map { SettingsSyncPrefs.encodeDestination($0, home: home) },
+                          customPaths: SettingsSyncPrefs.encodeCustomPaths(customPaths))
+    }
+
+    /// Adopts what the account has. The account's hand-added items replace
+    /// this Mac's (so a removal on one Mac sticks everywhere). Its destination
+    /// is only adopted when this Mac hasn't picked one and the folder's parent
+    /// (e.g. Dropbox) exists here — each Mac may legitimately use its own.
+    /// Returns whether anything changed; also reports whether the account is
+    /// missing something this Mac has and should be sent it.
+    func apply(_ account: SettingsSyncPrefs) -> (changed: Bool, needsPush: Bool) {
+        var changed = false
+        var needsPush = false
+        if let entries = account.customPaths {
+            let decoded = SettingsSyncPrefs.decodeCustomPaths(entries)
+            if decoded != customPaths {
+                customPaths = decoded
+                userDefaults.set(customPaths, forKey: customPathsDefaultsKey)
+                changed = true
+            }
+        } else if !customPaths.isEmpty {
+            needsPush = true
+        }
+        if let string = account.destination {
+            let url = SettingsSyncPrefs.decodeDestination(string, home: home)
+            if destination == nil,
+               FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path) {
+                setDestination(url)
+                if destination != nil { changed = true }
+            }
+        } else if destination != nil {
+            needsPush = true
+        }
+        return (changed, needsPush)
+    }
+
+    /// Pulls the signed-in user's Settings Sync choices. Returns whether they
+    /// changed anything here.
+    @discardableResult
+    func pullAccountPrefs() async -> Bool {
+        guard syncsToAccount, APIClient.isSignedIn,
+              let account = try? await APIClient.settingsSyncPrefs() else { return false }
+        let result = apply(account)
+        if result.needsPush { pushAccountPrefs() }
+        return result.changed
+    }
+
+    private func pushAccountPrefs() {
+        guard syncsToAccount, APIClient.isSignedIn else { return }
+        let prefs = self.prefs
+        Task { try? await APIClient.saveSettingsSyncPrefs(prefs) }
     }
 
     func enableSync(for item: AppSettingsItem) async {

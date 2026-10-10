@@ -72,11 +72,28 @@ enum APIClient {
         return response
     }
 
-    // MARK: - Settings catalog
+    // MARK: - Settings catalog (global, the same for everyone)
 
     /// Where audio apps and plugin makers keep their settings (see SettingsCatalog.json).
+    /// Public: needs no sign-in and says nothing about the user.
     static func settingsCatalog() async throws -> SettingsCatalog {
         try await get("settings_catalog")
+    }
+
+    // MARK: - User settings (per-user; the catalog above is global)
+
+    /// The user's Settings Sync choices from their account settings. Other
+    /// keys in the account's settings (the web app's own) are ignored.
+    static func settingsSyncPrefs() async throws -> SettingsSyncPrefs {
+        try await get("settings")
+    }
+
+    /// Merges the user's Settings Sync choices into their account settings,
+    /// leaving every other key alone.
+    static func saveSettingsSyncPrefs(_ prefs: SettingsSyncPrefs) async throws {
+        var req = try makeRequest("settings", method: "PATCH")
+        req.httpBody = try JSONEncoder().encode(["settings": prefs])
+        let _: SettingsSyncPrefs = try await decode(perform: req)
     }
 
     // MARK: - Computers / sync

@@ -392,7 +392,7 @@ final class AppSettingsSyncManagerTests: XCTestCase {
     }
 
     func testStatusReflectsDestinationChoiceAndAvailability() throws {
-        let manager = AppSettingsSyncManager(userDefaults: defaults, home: home)
+        let manager = AppSettingsSyncManager(userDefaults: defaults, home: home, syncsToAccount: false)
         let item = SettingsCatalog.bundled.appItems[0]
         XCTAssertEqual(manager.status(for: item), .noDestination)
 
@@ -411,12 +411,12 @@ final class AppSettingsSyncManagerTests: XCTestCase {
 
     func testDestinationAndCustomItemsPersist() {
         let destination = home.appendingPathComponent("Settings Destination")
-        let first = AppSettingsSyncManager(userDefaults: defaults, home: home)
+        let first = AppSettingsSyncManager(userDefaults: defaults, home: home, syncsToAccount: false)
         first.chooseDestination(destination)
         XCTAssertTrue(first.addCustomItem(at: home.appendingPathComponent("Library/Application Support/Serum"), owner: "Serum"))
         XCTAssertFalse(first.addCustomItem(at: URL(fileURLWithPath: "/etc/hosts")))
 
-        let second = AppSettingsSyncManager(userDefaults: defaults, home: home)
+        let second = AppSettingsSyncManager(userDefaults: defaults, home: home, syncsToAccount: false)
         XCTAssertEqual(second.destination?.path, destination.path)
         XCTAssertEqual(second.items.filter(\.isCustom).map(\.relativePath), ["Library/Application Support/Serum"])
         XCTAssertEqual(second.items.filter(\.isCustom).map(\.owner), ["Serum"])
@@ -424,7 +424,7 @@ final class AppSettingsSyncManagerTests: XCTestCase {
 
     func testEnableAndDisableSyncRoundTripRecordsTheFolder() async throws {
         let destination = home.appendingPathComponent("Settings Destination")
-        let manager = AppSettingsSyncManager(userDefaults: defaults, home: home)
+        let manager = AppSettingsSyncManager(userDefaults: defaults, home: home, syncsToAccount: false)
         manager.chooseDestination(destination)
         // Something unrelated already called "REAPER" is in the destination.
         try FileManager.default.createDirectory(at: destination.appendingPathComponent("REAPER"),
@@ -446,5 +446,51 @@ final class AppSettingsSyncManagerTests: XCTestCase {
         await manager.disableSync(for: item)
         XCTAssertNil(manager.lastError)
         XCTAssertEqual(manager.status(for: item), .notSynced(inDestination: true))
+    }
+
+    // MARK: Per-user choices
+
+    func testPrefsEncodeDestinationRelativeToHomeAndCustomPathsAsStrings() {
+        XCTAssertEqual(SettingsSyncPrefs.encodeDestination(home.appendingPathComponent("Dropbox/AudioBunny Settings"), home: home),
+                       "~/Dropbox/AudioBunny Settings")
+        XCTAssertEqual(SettingsSyncPrefs.encodeDestination(URL(fileURLWithPath: "/Volumes/Backup/Settings"), home: home),
+                       "/Volumes/Backup/Settings")
+        XCTAssertEqual(SettingsSyncPrefs.decodeDestination("~/Dropbox/X", home: home).path,
+                       home.appendingPathComponent("Dropbox/X").path)
+
+        let paths = ["Serum": ["Library/Application Support/Serum"], "Other": ["Documents/a", "Documents/b"]]
+        let encoded = SettingsSyncPrefs.encodeCustomPaths(paths)
+        XCTAssertEqual(encoded, ["Other\tDocuments/a", "Other\tDocuments/b", "Serum\tLibrary/Application Support/Serum"])
+        XCTAssertEqual(SettingsSyncPrefs.decodeCustomPaths(encoded), paths)
+        // Anything that isn't a home-relative path is dropped.
+        XCTAssertEqual(SettingsSyncPrefs.decodeCustomPaths(["X\t/etc", "X\t../up", "no tab"]), [:])
+    }
+
+    func testPrefsUseTheAccountSettingsKeys() throws {
+        let json = #"{"discover.category": "synth", "settingsSync.destination": "~/Dropbox/S", "settingsSync.customPaths": ["Other\tDocuments/a"]}"#
+        let prefs = try JSONDecoder().decode(SettingsSyncPrefs.self, from: Data(json.utf8))
+        XCTAssertEqual(prefs, SettingsSyncPrefs(destination: "~/Dropbox/S", customPaths: ["Other\tDocuments/a"]))
+    }
+
+    func testApplyAdoptsAccountChoicesWithoutOverridingThisMacsDestination() throws {
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("Dropbox"), withIntermediateDirectories: true)
+        let manager = AppSettingsSyncManager(userDefaults: defaults, home: home, syncsToAccount: false)
+        let account = SettingsSyncPrefs(destination: "~/Dropbox/AudioBunny Settings",
+                                        customPaths: ["Serum\tLibrary/Application Support/Serum"])
+
+        let first = manager.apply(account)
+        XCTAssertTrue(first.changed)
+        XCTAssertFalse(first.needsPush)
+        XCTAssertEqual(manager.destination?.path, home.appendingPathComponent("Dropbox/AudioBunny Settings").path)
+        XCTAssertEqual(manager.customPaths, ["Serum": ["Library/Application Support/Serum"]])
+
+        // A Mac with its own destination keeps it.
+        let elsewhere = home.appendingPathComponent("Elsewhere")
+        manager.chooseDestination(elsewhere)
+        XCTAssertFalse(manager.apply(account).changed)
+        XCTAssertEqual(manager.destination?.path, elsewhere.path)
+
+        // An account that has never seen Settings Sync gets this Mac's choices.
+        XCTAssertTrue(manager.apply(SettingsSyncPrefs()).needsPush)
     }
 }
