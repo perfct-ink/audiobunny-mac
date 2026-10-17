@@ -85,6 +85,13 @@ struct AppSettingsItem: Identifiable, Hashable {
     let detail: String
     let relativePath: String
     var source: Source = .audioApp
+    /// For an audio app: whether the app itself is installed on this Mac, or
+    /// nil when the catalog doesn't say how to tell. Settings left behind by
+    /// an app that's gone are listed but never suggested.
+    var appInstalled: Bool? = nil
+    /// Whether the location comes from the catalog rather than from searching
+    /// for folders named like a plugin or its maker.
+    var fromCatalog = false
 
     var id: String { "\(owner)|\(relativePath)" }
     var isCustom: Bool { source == .custom }
@@ -121,6 +128,17 @@ struct SettingsCatalog: Codable, Equatable {
         /// Version-numbered folders: every child of `parent` whose name starts
         /// with `prefix` (e.g. "Library/Preferences/Cubase 13").
         var versionedFolders: [VersionedFolder]?
+        /// How the app's bundle is named in /Applications, as prefixes of the
+        /// name without ".app" ("Ableton Live" matches "Ableton Live 12
+        /// Suite"). Any match means the app is installed.
+        var appBundles: [String]?
+
+        func isInstalled(bundleNames: Set<String>) -> Bool? {
+            guard let prefixes = appBundles, !prefixes.isEmpty else { return nil }
+            return bundleNames.contains { name in
+                prefixes.contains { name.range(of: $0, options: [.caseInsensitive, .anchored]) != nil }
+            }
+        }
     }
 
     struct VersionedFolder: Codable, Equatable {
@@ -171,10 +189,14 @@ struct SettingsCatalog: Codable, Equatable {
         return catalog
     }()
 
-    /// Every fixed app location as an item.
-    var appItems: [AppSettingsItem] {
+    /// Every fixed app location as an item. Pass the .app names found on this
+    /// Mac (`installedAppBundleNames`) to record whether each app is installed.
+    func appItems(installedBundles: Set<String>? = nil) -> [AppSettingsItem] {
         apps.flatMap { app in
-            (app.paths ?? []).map { AppSettingsItem(owner: app.name, detail: app.detail, relativePath: $0) }
+            (app.paths ?? []).map {
+                AppSettingsItem(owner: app.name, detail: app.detail, relativePath: $0,
+                                appInstalled: installedBundles.flatMap { app.isInstalled(bundleNames: $0) }, fromCatalog: true)
+            }
         }
     }
 
@@ -228,6 +250,36 @@ func folderMatchesPluginName(_ folderName: String, pluginName: String) -> Bool {
     return pluginKey.count >= 3 && key(folderName) == pluginKey
 }
 
+// MARK: - Installed apps
+
+/// Where apps get installed.
+func defaultApplicationFolders(home: URL) -> [URL] {
+    [URL(fileURLWithPath: "/Applications"), home.appendingPathComponent("Applications")]
+}
+
+/// Names (without ".app") of every app in `folders`, including ones a vendor
+/// tucks into subfolders ("/Applications/Native Instruments/Kontakt 7/Kontakt
+/// 7.app"). Doesn't look inside app bundles.
+func installedAppBundleNames(in folders: [URL], depth: Int = 3) -> Set<String> {
+    let fm = FileManager.default
+    var names = Set<String>()
+    func scan(_ folder: URL, _ remaining: Int) {
+        for name in (try? fm.contentsOfDirectory(atPath: folder.path)) ?? [] where !name.hasPrefix(".") {
+            if name.hasSuffix(".app") {
+                names.insert(String(name.dropLast(4)))
+            } else if remaining > 1 {
+                var isDir: ObjCBool = false
+                let url = folder.appendingPathComponent(name)
+                if fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                    scan(url, remaining - 1)
+                }
+            }
+        }
+    }
+    for folder in folders { scan(folder, depth) }
+    return names
+}
+
 /// Everything worth offering on this Mac: the catalog's audio apps and
 /// versioned DAW preference folders, plus each installed plugin's settings
 /// folders — the catalog's locations for its maker when present, else a
@@ -237,7 +289,8 @@ func folderMatchesPluginName(_ folderName: String, pluginName: String) -> Bool {
 /// nothing is here yet. Does filesystem I/O — call off the main thread.
 func discoverAppSettingsItems(home: URL, manifest: [String: String],
                               plugins: [(name: String, manufacturer: String)],
-                              catalog: SettingsCatalog = .bundled) -> [AppSettingsItem] {
+                              catalog: SettingsCatalog = .bundled,
+                              installedBundles: Set<String>? = nil) -> [AppSettingsItem] {
     let fm = FileManager.default
     let syncedPaths = Set(manifest.values)
 
@@ -265,7 +318,7 @@ func discoverAppSettingsItems(home: URL, manifest: [String: String],
         return names.sorted()
     }
 
-    let appItems = catalog.appItems
+    let appItems = catalog.appItems(installedBundles: installedBundles)
     var result = appItems.filter { present($0.relativePath) }
     var claimed = Set(appItems.map(\.relativePath))
 
@@ -274,7 +327,9 @@ func discoverAppSettingsItems(home: URL, manifest: [String: String],
             for name in childFolders(of: versioned.parent) where name.hasPrefix(versioned.prefix) {
                 let relative = "\(versioned.parent)/\(name)"
                 guard claimed.insert(relative).inserted else { continue }
-                result.append(AppSettingsItem(owner: name, detail: app.detail, relativePath: relative))
+                result.append(AppSettingsItem(owner: name, detail: app.detail, relativePath: relative,
+                                              appInstalled: installedBundles.flatMap { app.isInstalled(bundleNames: $0) },
+                                              fromCatalog: true))
             }
         }
     }
@@ -291,7 +346,7 @@ func discoverAppSettingsItems(home: URL, manifest: [String: String],
                 for path in catalogPaths {
                     result.append(AppSettingsItem(owner: plugin.name,
                                                   detail: vendor.detail ?? "\(plugin.manufacturer) settings",
-                                                  relativePath: path, source: .plugin))
+                                                  relativePath: path, source: .plugin, fromCatalog: true))
                 }
                 continue
             }
@@ -591,6 +646,80 @@ func appSettingsStatus(local: URL, remote: URL?) -> AppSettingsSyncStatus {
     return .notSynced(inDestination: false)
 }
 
+// MARK: - Suggestions
+
+/// Why an item is suggested, strongest first.
+enum SettingsSuggestionReason: Int, Comparable {
+    /// Another Mac already moved it into the destination.
+    case syncedOnAnotherMac
+    /// An audio app installed here, with settings here.
+    case installedApp
+    /// An installed plugin's settings, at a location the catalog knows.
+    case knownPluginLocation
+    /// An installed plugin's settings, found by folder name.
+    case foundPluginFolder
+
+    static func < (a: Self, b: Self) -> Bool { a.rawValue < b.rawValue }
+
+    var label: String {
+        switch self {
+        case .syncedOnAnotherMac: return "Synced on another Mac"
+        case .installedApp: return "Installed"
+        case .knownPluginLocation: return "Installed plugin"
+        case .foundPluginFolder: return "Installed plugin · found by name"
+        }
+    }
+}
+
+struct SettingsSuggestion: Identifiable, Equatable {
+    let item: AppSettingsItem
+    let reason: SettingsSuggestionReason
+    /// Everything installed that uses this location — one vendor folder can
+    /// hold several plugins' settings.
+    let owners: [String]
+
+    var id: String { item.relativePath }
+}
+
+/// What's worth syncing on this Mac that isn't yet: settings of apps and
+/// plugins that are actually installed here, those another Mac already put in
+/// the destination first. Leaves out items added by hand (the user
+/// already decided), settings left behind by an app that's gone, and
+/// locations the user dismissed. One suggestion per location, strongest
+/// reason first.
+func settingsSuggestions(items: [AppSettingsItem],
+                         status: (AppSettingsItem) -> AppSettingsSyncStatus,
+                         dismissed: Set<String>) -> [SettingsSuggestion] {
+    var byPath: [String: SettingsSuggestion] = [:]
+    var order: [String] = []
+    for item in items where !item.isCustom && !dismissed.contains(item.relativePath) {
+        guard case .notSynced(let inDestination) = status(item) else { continue }
+        if item.source == .audioApp && item.appInstalled == false { continue }
+        let reason: SettingsSuggestionReason
+        if inDestination {
+            reason = .syncedOnAnotherMac
+        } else if item.source == .audioApp {
+            reason = .installedApp
+        } else {
+            reason = item.fromCatalog ? .knownPluginLocation : .foundPluginFolder
+        }
+        if let existing = byPath[item.relativePath] {
+            let owners = existing.owners.contains(item.owner) ? existing.owners : existing.owners + [item.owner]
+            byPath[item.relativePath] = reason < existing.reason
+                ? SettingsSuggestion(item: item, reason: reason, owners: owners)
+                : SettingsSuggestion(item: existing.item, reason: existing.reason, owners: owners)
+        } else {
+            byPath[item.relativePath] = SettingsSuggestion(item: item, reason: reason, owners: [item.owner])
+            order.append(item.relativePath)
+        }
+    }
+    // Stable within a reason, so the list keeps discovery's order.
+    return order.enumerated()
+        .compactMap { index, path in byPath[path].map { (index, $0) } }
+        .sorted { ($0.1.reason, $0.0) < ($1.1.reason, $1.0) }
+        .map { $0.1 }
+}
+
 // MARK: - The user's own choices
 
 /// What one user chose in Settings Sync — the per-user counterpart to the
@@ -658,11 +787,16 @@ final class AppSettingsSyncManager: ObservableObject {
     @Published var lastError: String?
     /// Home-relative paths being linked or unlinked right now.
     @Published private(set) var workingPaths: Set<String> = []
+    /// Home-relative paths whose suggestion the user dismissed on this Mac.
+    @Published private(set) var dismissedSuggestions: Set<String> = []
 
     let home: URL
     private let userDefaults: UserDefaults
     private let destinationDefaultsKey = "audiobunny.settingsSync.destination"
     private let customPathsDefaultsKey = "audiobunny.settingsSync.customPaths"
+    private let dismissedDefaultsKey = "audiobunny.settingsSync.dismissedSuggestions"
+    /// Where to look for installed apps (fake folders in tests).
+    private let applicationFolders: [URL]
 
     /// Whether to mirror the user's choices to their account when signed in
     /// (off in tests, so they never touch a real account).
@@ -670,11 +804,15 @@ final class AppSettingsSyncManager: ObservableObject {
 
     init(userDefaults: UserDefaults = .standard,
          home: URL = FileManager.default.homeDirectoryForCurrentUser,
-         syncsToAccount: Bool = true) {
+         syncsToAccount: Bool = true,
+         applicationFolders: [URL]? = nil) {
         self.userDefaults = userDefaults
         self.home = home
         self.syncsToAccount = syncsToAccount
-        catalog = SettingsCatalog.loadCached() ?? .bundled
+        self.applicationFolders = applicationFolders ?? defaultApplicationFolders(home: home)
+        // A newer app's bundled catalog beats an older cached download.
+        catalog = [SettingsCatalog.loadCached(), SettingsCatalog.bundled].compactMap { $0 }.max { $0.version < $1.version } ?? .bundled
+        dismissedSuggestions = Set(userDefaults.stringArray(forKey: dismissedDefaultsKey) ?? [])
         if let path = userDefaults.string(forKey: destinationDefaultsKey) {
             destination = URL(fileURLWithPath: path)
         }
@@ -750,14 +888,17 @@ final class AppSettingsSyncManager: ObservableObject {
         }
     }
 
-    private func runDiscovery(plugins: [(name: String, manufacturer: String)]) async {
+    /// Discovery from what's on this Mac only — no account or catalog fetch.
+    func runDiscovery(plugins: [(name: String, manufacturer: String)]) async {
         reloadManifest()
         isDiscovering = true
         let home = self.home
         let manifest = self.manifest
         let catalog = self.catalog
+        let applicationFolders = self.applicationFolders
         let found = await Task.detached(priority: .userInitiated) {
-            discoverAppSettingsItems(home: home, manifest: manifest, plugins: plugins, catalog: catalog)
+            discoverAppSettingsItems(home: home, manifest: manifest, plugins: plugins, catalog: catalog,
+                                     installedBundles: installedAppBundleNames(in: applicationFolders))
         }.value
         discoveredItems = found
         hasDiscovered = true
@@ -808,6 +949,43 @@ final class AppSettingsSyncManager: ObservableObject {
     }
 
     func isWorking(_ item: AppSettingsItem) -> Bool { workingPaths.contains(item.relativePath) }
+
+    // MARK: Suggestions
+
+    /// What to sync next, based on what's installed on this Mac.
+    var suggestions: [SettingsSuggestion] {
+        guard destinationAvailable else { return [] }
+        return settingsSuggestions(items: items, status: { self.status(for: $0) }, dismissed: dismissedSuggestions)
+    }
+
+    /// Suggestions the user dismissed that would otherwise still show.
+    var dismissedSuggestionCount: Int {
+        guard destinationAvailable, !dismissedSuggestions.isEmpty else { return 0 }
+        return settingsSuggestions(items: items, status: { self.status(for: $0) }, dismissed: []).count - suggestions.count
+    }
+
+    func dismissSuggestion(_ suggestion: SettingsSuggestion) {
+        dismissedSuggestions.insert(suggestion.item.relativePath)
+        userDefaults.set(dismissedSuggestions.sorted(), forKey: dismissedDefaultsKey)
+    }
+
+    func restoreDismissedSuggestions() {
+        dismissedSuggestions = []
+        userDefaults.removeObject(forKey: dismissedDefaultsKey)
+    }
+
+    /// Syncs each suggestion in turn, carrying on past failures. Returns the
+    /// owners that couldn't be synced (also reported in `lastError`).
+    @discardableResult
+    func enableSync(for suggestions: [SettingsSuggestion]) async -> [String] {
+        var failed: [String] = []
+        for suggestion in suggestions {
+            await enableSync(for: suggestion.item)
+            if status(for: suggestion.item) != .synced { failed.append(suggestion.item.owner) }
+        }
+        lastError = failed.isEmpty ? nil : "Couldn't sync \(failed.joined(separator: ", ")). Try them one at a time to see why."
+        return failed
+    }
 
     @discardableResult
     func addCustomItem(at url: URL, owner: String = otherSettingsOwner) -> Bool {

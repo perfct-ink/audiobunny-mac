@@ -181,7 +181,7 @@ final class AppSettingsSyncTests: XCTestCase {
         XCTAssertGreaterThan(catalog.version, 0)
         XCTAssertFalse(catalog.apps.isEmpty)
         let destination = home.appendingPathComponent("Destination")
-        let paths = catalog.appItems.map(\.relativePath)
+        let paths = catalog.appItems().map(\.relativePath)
             + catalog.pluginVendors.flatMap(\.paths).map { $0.replacingOccurrences(of: "{plugin}", with: "Plugin") }
         for path in paths {
             XCTAssertFalse(path.hasPrefix("/") || path.hasPrefix("~"), "\(path) must be relative to home")
@@ -200,6 +200,91 @@ final class AppSettingsSyncTests: XCTestCase {
     }
 
     // MARK: Destination layout
+
+    // MARK: Installed apps and suggestions
+
+    func testInstalledAppsFoundInApplicationsAndVendorSubfolders() throws {
+        let fm = FileManager.default
+        let apps = home.appendingPathComponent("Applications")
+        for path in ["Ableton Live 12 Suite.app/Contents/MacOS",
+                     "Native Instruments/Kontakt 7/Kontakt 7.app",
+                     "Utilities/Deep/Deeper/Too Deep.app",
+                     "Notes.txt"] {
+            try fm.createDirectory(at: apps.appendingPathComponent(path), withIntermediateDirectories: true)
+        }
+        XCTAssertEqual(installedAppBundleNames(in: [apps, home.appendingPathComponent("Missing")]),
+                       ["Ableton Live 12 Suite", "Kontakt 7"])
+    }
+
+    func testAppIsInstalledWhenABundleNameStartsWithAPrefix() {
+        let live = SettingsCatalog.App(name: "Ableton Live", detail: "", paths: [], appBundles: ["Ableton Live"])
+        XCTAssertEqual(live.isInstalled(bundleNames: ["ableton live 12 suite"]), true)
+        XCTAssertEqual(live.isInstalled(bundleNames: ["Not Ableton Live"]), false)
+        XCTAssertNil(SettingsCatalog.App(name: "X", detail: "", paths: []).isInstalled(bundleNames: ["X"]))
+    }
+
+    func testDiscoveryRecordsWhetherEachAppIsInstalled() throws {
+        let fm = FileManager.default
+        for path in ["Music/Ableton/User Library", "Documents/Bitwig Studio", "Library/Preferences/Cubase 13"] {
+            try fm.createDirectory(at: home.appendingPathComponent(path), withIntermediateDirectories: true)
+        }
+        let catalog = SettingsCatalog(version: 2, apps: [
+            .init(name: "Ableton Live", detail: "", paths: ["Music/Ableton/User Library"], appBundles: ["Ableton Live"]),
+            .init(name: "Bitwig Studio", detail: "", paths: ["Documents/Bitwig Studio"], appBundles: ["Bitwig Studio"]),
+            .init(name: "Cubase", detail: "", versionedFolders: [.init(parent: "Library/Preferences", prefix: "Cubase ")],
+                  appBundles: ["Cubase"]),
+        ], pluginVendors: [])
+        let items = discoverAppSettingsItems(home: home, manifest: [:], plugins: [], catalog: catalog,
+                                             installedBundles: ["Ableton Live 12 Suite", "Cubase 13"])
+        func installed(_ owner: String) -> Bool? { items.first { $0.owner == owner }?.appInstalled }
+        XCTAssertEqual(installed("Ableton Live"), true)
+        XCTAssertEqual(installed("Bitwig Studio"), false)
+        XCTAssertEqual(installed("Cubase 13"), true)
+        XCTAssertTrue(items.allSatisfy(\.fromCatalog))
+    }
+
+    func testSuggestionsCoverInstalledThingsNotYetSyncedStrongestFirst() {
+        let items = [
+            AppSettingsItem(owner: "Pro-L 2", detail: "", relativePath: "Library/Application Support/FabFilter", source: .plugin),
+            AppSettingsItem(owner: "Diva", detail: "", relativePath: "Library/Application Support/u-he",
+                            source: .plugin, fromCatalog: true),
+            AppSettingsItem(owner: "Bitwig Studio", detail: "", relativePath: "Documents/Bitwig Studio", appInstalled: false),
+            AppSettingsItem(owner: "Ableton Live", detail: "", relativePath: "Music/Ableton/User Library", appInstalled: true),
+            AppSettingsItem(owner: "REAPER", detail: "", relativePath: "Library/Application Support/REAPER"),
+            AppSettingsItem(owner: "Pro Tools", detail: "", relativePath: "Documents/Pro Tools", appInstalled: true),
+            AppSettingsItem(owner: "Pro-Q 3", detail: "", relativePath: "Library/Application Support/FabFilter", source: .plugin),
+            AppSettingsItem(owner: "Logic", detail: "", relativePath: "Music/Audio Music Apps", appInstalled: true),
+            AppSettingsItem(owner: "Serum", detail: "", relativePath: "Library/Application Support/Serum", source: .plugin),
+            .custom(owner: "Other", relativePath: "Documents/Mine"),
+        ]
+        let status: (AppSettingsItem) -> AppSettingsSyncStatus = { item in
+            switch item.owner {
+            // Another Mac synced both, but Bitwig isn't installed here.
+            case "Pro Tools", "Bitwig Studio": return .notSynced(inDestination: true)
+            case "Logic": return .synced
+            default: return .notSynced(inDestination: false)
+            }
+        }
+        let suggestions = settingsSuggestions(items: items, status: status,
+                                              dismissed: ["Library/Application Support/Serum"])
+
+        XCTAssertEqual(suggestions.map(\.item.relativePath), [
+            "Documents/Pro Tools",
+            "Music/Ableton/User Library",
+            "Library/Application Support/REAPER", // the catalog can't tell, but its settings are here
+            "Library/Application Support/u-he",
+            "Library/Application Support/FabFilter",
+        ])
+        XCTAssertEqual(suggestions.map(\.reason), [.syncedOnAnotherMac, .installedApp, .installedApp,
+                                                   .knownPluginLocation, .foundPluginFolder])
+        XCTAssertEqual(suggestions.last?.owners, ["Pro-L 2", "Pro-Q 3"])
+    }
+
+    func testBundledCatalogSaysHowToTellEachAppIsInstalled() {
+        for app in SettingsCatalog.bundled.apps {
+            XCTAssertFalse(app.appBundles?.isEmpty ?? true, "\(app.name) has no appBundles")
+        }
+    }
 
     func testNewNameIsTheFolderNameWhenFree() {
         XCTAssertEqual(newSettingsName(for: "Library/Application Support/u-he", destination: syncRoot, manifest: [:]), "u-he")
@@ -393,7 +478,7 @@ final class AppSettingsSyncManagerTests: XCTestCase {
 
     func testStatusReflectsDestinationChoiceAndAvailability() throws {
         let manager = AppSettingsSyncManager(userDefaults: defaults, home: home, syncsToAccount: false)
-        let item = SettingsCatalog.bundled.appItems[0]
+        let item = SettingsCatalog.bundled.appItems()[0]
         XCTAssertEqual(manager.status(for: item), .noDestination)
 
         manager.useProvider(.dropbox)
@@ -446,6 +531,50 @@ final class AppSettingsSyncManagerTests: XCTestCase {
         await manager.disableSync(for: item)
         XCTAssertNil(manager.lastError)
         XCTAssertEqual(manager.status(for: item), .notSynced(inDestination: true))
+    }
+
+    func testSuggestionsCanBeDismissedRestoredAndSyncedAllAtOnce() async throws {
+        let fm = FileManager.default
+        let apps = home.appendingPathComponent("Applications")
+        try fm.createDirectory(at: apps.appendingPathComponent("REAPER.app"), withIntermediateDirectories: true)
+        for path in ["Library/Application Support/REAPER", "Library/Application Support/FabFilter"] {
+            try write("x", to: home.appendingPathComponent(path).appendingPathComponent("settings"))
+        }
+        let manager = AppSettingsSyncManager(userDefaults: defaults, home: home, syncsToAccount: false,
+                                             applicationFolders: [apps])
+        XCTAssertTrue(manager.suggestions.isEmpty) // no destination yet
+        manager.chooseDestination(home.appendingPathComponent("Settings Destination"))
+        await manager.runDiscovery(plugins: [(name: "Pro-Q 3", manufacturer: "FabFilter")])
+
+        let paths = manager.suggestions.map(\.item.relativePath)
+        XCTAssertTrue(paths.contains("Library/Application Support/REAPER"))
+        XCTAssertTrue(paths.contains("Library/Application Support/FabFilter"))
+
+        let fabFilter = try XCTUnwrap(manager.suggestions.first { $0.item.relativePath.hasSuffix("FabFilter") })
+        manager.dismissSuggestion(fabFilter)
+        XCTAssertFalse(manager.suggestions.contains(fabFilter))
+        XCTAssertEqual(manager.dismissedSuggestionCount, 1)
+        // Dismissals stick across launches.
+        let relaunched = AppSettingsSyncManager(userDefaults: defaults, home: home, syncsToAccount: false,
+                                                applicationFolders: [apps])
+        XCTAssertEqual(relaunched.dismissedSuggestions, [fabFilter.item.relativePath])
+        manager.restoreDismissedSuggestions()
+        XCTAssertEqual(manager.dismissedSuggestionCount, 0)
+
+        let failed = await manager.enableSync(for: manager.suggestions)
+        XCTAssertEqual(failed, [])
+        XCTAssertNil(manager.lastError)
+        XCTAssertTrue(manager.suggestions.filter { paths.contains($0.item.relativePath) }.isEmpty)
+        XCTAssertTrue(try isSymlink(home.appendingPathComponent("Library/Application Support/REAPER")))
+    }
+
+    private func write(_ text: String, to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: url)
+    }
+
+    private func isSymlink(_ url: URL) throws -> Bool {
+        try FileManager.default.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType == .typeSymbolicLink
     }
 
     // MARK: Per-user choices

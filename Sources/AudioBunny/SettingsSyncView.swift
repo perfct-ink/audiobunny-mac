@@ -17,6 +17,9 @@ struct SettingsSyncView: View {
     /// The owner an item picked with `showItemPicker` gets added under.
     @State private var addingFor = otherSettingsOwner
     @State private var pendingAction: SettingsSyncAction?
+    /// Suggestions waiting on the "Sync All" confirmation.
+    @State private var pendingSyncAll: [SettingsSuggestion]?
+    @State private var syncingAll = false
 
     private struct InstalledPlugin: Hashable {
         let name: String
@@ -81,6 +84,27 @@ struct SettingsSyncView: View {
             Divider()
 
             content
+                .confirmationDialog(
+                    "Move and link \(pendingSyncAll?.count ?? 0) suggested settings?",
+                    isPresented: Binding(get: { pendingSyncAll != nil }, set: { if !$0 { pendingSyncAll = nil } }),
+                    titleVisibility: .visible
+                ) {
+                    if let suggestions = pendingSyncAll {
+                        Button("Move and Link All") {
+                            pendingSyncAll = nil
+                            syncingAll = true
+                            Task {
+                                await syncManager.enableSync(for: suggestions)
+                                syncingAll = false
+                            }
+                        }
+                        Button("Cancel", role: .cancel) { pendingSyncAll = nil }
+                    }
+                } message: {
+                    if let suggestions = pendingSyncAll {
+                        Text(syncAllMessage(suggestions))
+                    }
+                }
         }
         // Re-runs when the destination changes (so items another Mac already
         // moved there show up) and when a plugin scan finishes.
@@ -173,6 +197,10 @@ struct SettingsSyncView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List {
+                if searchText.isEmpty {
+                    suggestedSection
+                }
+
                 let apps = syncManager.items.filter { $0.source == .audioApp && matchesSearch($0.owner) }
                 if !apps.isEmpty {
                     Section("Audio Apps") {
@@ -225,6 +253,59 @@ struct SettingsSyncView: View {
         }
     }
 
+    // MARK: Suggestions
+
+    /// Settings of apps and plugins installed on this Mac that aren't synced
+    /// yet, strongest first. They're also listed in their own sections below.
+    @ViewBuilder
+    private var suggestedSection: some View {
+        let suggestions = syncManager.suggestions
+        let dismissedCount = syncManager.dismissedSuggestionCount
+        if !suggestions.isEmpty || dismissedCount > 0 {
+            Section {
+                if suggestions.isEmpty {
+                    Text("Nothing else to suggest.").font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(suggestions) { suggestion in
+                    SettingsSyncRow(item: suggestion.item,
+                                    title: suggestion.owners.joined(separator: ", "),
+                                    pendingAction: $pendingAction,
+                                    note: suggestion.reason.label,
+                                    onDismiss: { syncManager.dismissSuggestion(suggestion) })
+                }
+            } header: {
+                HStack {
+                    Text("Suggested for This Mac")
+                    Text("Based on the apps and plugins installed here").foregroundStyle(.secondary)
+                    Spacer()
+                    if syncingAll {
+                        ProgressView().scaleEffect(0.5).frame(width: 14, height: 14)
+                    } else if suggestions.count > 1 {
+                        Button("Sync All (\(suggestions.count))") { pendingSyncAll = suggestions }
+                            .buttonStyle(.link)
+                            .font(.caption)
+                    }
+                }
+            } footer: {
+                if dismissedCount > 0 {
+                    Button("Show \(dismissedCount) dismissed") { syncManager.restoreDismissedSuggestions() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            }
+        }
+    }
+
+    private func syncAllMessage(_ suggestions: [SettingsSuggestion]) -> String {
+        let names = suggestions.flatMap(\.owners)
+        var message = "AudioBunny will move each one into the destination folder and put a link where it was. Anything another Mac already synced switches to that copy, keeping this Mac's as a backup. Quit these first: \(names.joined(separator: ", "))."
+        let total = suggestions.reduce(Int64(0)) { $0 + (syncManager.sizes[$1.item.relativePath] ?? 0) }
+        if total >= largeItemBytes {
+            message += " That's \(formattedSize(total)) in all."
+        }
+        return message
+    }
+
     private func placeholder(_ icon: String, _ text: String) -> some View {
         VStack(spacing: 8) {
             Image(systemName: icon)
@@ -275,6 +356,10 @@ struct SettingsSyncRow: View {
     let item: AppSettingsItem
     let title: String
     @Binding var pendingAction: SettingsSyncAction?
+    /// Why it's shown, for suggestions.
+    var note: String? = nil
+    /// Set for suggestions: hides this one.
+    var onDismiss: (() -> Void)? = nil
 
     var body: some View {
         let status = syncManager.status(for: item)
@@ -285,6 +370,15 @@ struct SettingsSyncRow: View {
                 HStack(spacing: 6) {
                     Text(title).lineLimit(1)
                     Text(item.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    if let note {
+                        Text(note)
+                            .font(.caption2)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                            .foregroundStyle(Color.accentColor)
+                            .lineLimit(1)
+                    }
                 }
                 Text(pathLine(status))
                     .font(.caption2)
@@ -326,6 +420,16 @@ struct SettingsSyncRow: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     .help("Remove from this list")
+                }
+                if let onDismiss {
+                    Button {
+                        onDismiss()
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Don't suggest this")
                 }
             }
         }

@@ -1,60 +1,71 @@
 {
-  "version": 1,
+  "version": 2,
   "apps": [
     {
       "name": "Ableton Live",
       "detail": "User Library (presets, templates, defaults)",
-      "paths": ["Music/Ableton/User Library"]
+      "paths": ["Music/Ableton/User Library"],
+      "appBundles": ["Ableton Live"]
     },
     {
       "name": "Logic Pro & MainStage",
       "detail": "Patches, channel strips, key commands, templates",
-      "paths": ["Music/Audio Music Apps"]
+      "paths": ["Music/Audio Music Apps"],
+      "appBundles": ["Logic Pro", "MainStage"]
     },
     {
       "name": "Bitwig Studio",
       "detail": "Library, templates, controller scripts",
-      "paths": ["Documents/Bitwig Studio"]
+      "paths": ["Documents/Bitwig Studio"],
+      "appBundles": ["Bitwig Studio"]
     },
     {
       "name": "REAPER",
       "detail": "Preferences, actions, scripts, themes",
-      "paths": ["Library/Application Support/REAPER"]
+      "paths": ["Library/Application Support/REAPER"],
+      "appBundles": ["REAPER"]
     },
     {
       "name": "FL Studio",
       "detail": "User data, presets, templates",
-      "paths": ["Documents/Image-Line"]
+      "paths": ["Documents/Image-Line"],
+      "appBundles": ["FL Studio"]
     },
     {
       "name": "Studio One",
       "detail": "User presets, templates, scripts",
-      "paths": ["Documents/Studio One"]
+      "paths": ["Documents/Studio One"],
+      "appBundles": ["Studio One", "Fender Studio Pro"]
     },
     {
       "name": "Pro Tools",
       "detail": "Templates, I/O settings",
-      "paths": ["Documents/Pro Tools"]
+      "paths": ["Documents/Pro Tools"],
+      "appBundles": ["Pro Tools"]
     },
     {
       "name": "Cubase & Nuendo",
       "detail": "User content, templates",
-      "paths": ["Documents/Steinberg"]
+      "paths": ["Documents/Steinberg"],
+      "appBundles": ["Cubase", "Nuendo"]
     },
     {
       "name": "Cubase",
       "detail": "Cubase preferences",
-      "versionedFolders": [{ "parent": "Library/Preferences", "prefix": "Cubase " }]
+      "versionedFolders": [{ "parent": "Library/Preferences", "prefix": "Cubase " }],
+      "appBundles": ["Cubase"]
     },
     {
       "name": "Nuendo",
       "detail": "Nuendo preferences",
-      "versionedFolders": [{ "parent": "Library/Preferences", "prefix": "Nuendo " }]
+      "versionedFolders": [{ "parent": "Library/Preferences", "prefix": "Nuendo " }],
+      "appBundles": ["Nuendo"]
     },
     {
       "name": "Native Instruments",
       "detail": "User content (Kontakt, Massive X, Komplete Kontrol…)",
-      "paths": ["Documents/Native Instruments"]
+      "paths": ["Documents/Native Instruments"],
+      "appBundles": ["Native Access", "Kontakt", "Komplete Kontrol", "Maschine", "Reaktor", "Massive X", "Guitar Rig", "Traktor"]
     }
   ],
   "pluginVendors": [
