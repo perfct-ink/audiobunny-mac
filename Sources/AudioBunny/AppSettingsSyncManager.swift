@@ -65,6 +65,16 @@ func suggestedSettingsDestination(providerRoot: URL) -> URL {
     providerRoot.appendingPathComponent("AudioBunny/Settings", isDirectory: true)
 }
 
+/// The folder that must already be on this Mac before AudioBunny adopts
+/// `destination` from the account — the cloud folder (or drive) it lives in.
+/// For the suggested layout that's above "AudioBunny/Settings", since another
+/// Mac creates the "AudioBunny" folder and it may not have synced down yet.
+func settingsDestinationRoot(_ destination: URL) -> URL {
+    let parent = destination.deletingLastPathComponent()
+    let isSuggestedLayout = destination.lastPathComponent == "Settings" && parent.lastPathComponent == "AudioBunny"
+    return isSuggestedLayout ? parent.deletingLastPathComponent() : parent
+}
+
 // MARK: - Items
 
 /// One settings file or folder that can be moved into the destination folder
@@ -1074,8 +1084,7 @@ final class AppSettingsSyncManager: ObservableObject {
         }
         if let string = account.destination {
             let url = SettingsSyncPrefs.decodeDestination(string, home: home)
-            if destination == nil,
-               FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path) {
+            if destination == nil, FileManager.default.fileExists(atPath: settingsDestinationRoot(url).path) {
                 setDestination(url)
                 if destination != nil { changed = true }
             }
