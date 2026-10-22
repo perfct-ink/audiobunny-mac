@@ -30,6 +30,36 @@ final class APIComputerDecodingTests: XCTestCase {
         let plugin = try JSONDecoder().decode(APIComputerPlugin.self, from: json)
         XCTAssertEqual(plugin.id, "vst 3|xfer records|serum")
     }
+
+    func testDecodesComputerPluginWithRegistryFields() throws {
+        let json = """
+        {"id": 7, "plugin_id": 12, "name": "Pro-Q 3", "manufacturer": "FabFilter",
+         "plugin_type": "Audio Unit", "category": null, "version": null}
+        """.data(using: .utf8)!
+        let plugin = try JSONDecoder().decode(APIComputerPlugin.self, from: json)
+        XCTAssertEqual(plugin.name, "Pro-Q 3")
+        XCTAssertNil(plugin.version)
+    }
+}
+
+final class PluginSyncPayloadTests: XCTestCase {
+    func testPayloadIncludesFormatVersionAndCategory() {
+        let plugin = AudioPlugin(name: "Serum", manufacturer: "Xfer Records", type: .vst3,
+                                 fileURL: URL(fileURLWithPath: "/Library/Audio/Plug-Ins/VST3/Serum.vst3"),
+                                 version: "1.3", category: .instrument)
+        XCTAssertEqual(APIClient.pluginSyncPayload([plugin]), [[
+            "name": "Serum", "manufacturer": "Xfer Records", "plugin_type": "VST 3",
+            "version": "1.3", "category": "instrument",
+        ]])
+    }
+
+    func testPayloadSendsBlanksForUnknownVersionAndCategory() {
+        let plugin = AudioPlugin(name: "Odd", manufacturer: "", type: .vst2,
+                                 fileURL: URL(fileURLWithPath: "/Library/Audio/Plug-Ins/VST/Odd.vst"))
+        let payload = APIClient.pluginSyncPayload([plugin])
+        XCTAssertEqual(payload.first?["version"], "")
+        XCTAssertEqual(payload.first?["category"], "")
+    }
 }
 
 @MainActor

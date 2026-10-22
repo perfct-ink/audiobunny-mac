@@ -88,6 +88,10 @@ struct ContentView: View {
             guard newValue != nil else { return }
             Task { await computerSyncManager.syncNow(pluginManager: manager, liveProjectManager: liveProjectManager) }
         }
+        .onChange(of: manager.isScanning) { scanning in
+            guard !scanning, presetManager.currentUser != nil else { return }
+            Task { await computerSyncManager.reportPlugins(pluginManager: manager) }
+        }
     }
 
     @ViewBuilder

@@ -21,13 +21,32 @@ final class ComputerSyncManager: ObservableObject {
         lastSyncError = nil
         do {
             let computer = try await APIClient.registerComputer(name: ComputerIdentity.name)
-            try await APIClient.syncPlugins(computerID: computer.id, plugins: pluginManager.plugins)
+            // Mid-scan the list is empty or partial and would overwrite this
+            // computer's inventory on the server; reportPlugins runs once the
+            // scan finishes instead.
+            if !pluginManager.isScanning {
+                try await APIClient.syncPlugins(computerID: computer.id, plugins: pluginManager.plugins)
+            }
             try await APIClient.syncProjects(liveProjectManager.folders)
             lastSyncedAt = Date()
         } catch {
             lastSyncError = error.localizedDescription
         }
         isSyncing = false
+    }
+
+    /// Sends this computer's installed plugins to the server. Called after
+    /// every plugin scan finishes (launch, Refresh Plugins, after an install)
+    /// while signed in, so the account always knows what's on this Mac.
+    func reportPlugins(pluginManager: PluginManager) async {
+        guard !pluginManager.isScanning else { return }
+        do {
+            let computer = try await APIClient.registerComputer(name: ComputerIdentity.name)
+            try await APIClient.syncPlugins(computerID: computer.id, plugins: pluginManager.plugins)
+            lastSyncedAt = Date()
+        } catch {
+            lastSyncError = error.localizedDescription
+        }
     }
 
     /// True if `computer` is the Mac AudioBunny is running on right now —

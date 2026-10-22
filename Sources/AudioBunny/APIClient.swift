@@ -102,20 +102,25 @@ enum APIClient {
         try await post("computers/register", body: ["client_uuid": ComputerIdentity.id, "name": name])
     }
 
+    /// Replaces this computer's plugin inventory on the server. The server
+    /// also records each plugin in its global registry of known plugins.
     static func syncPlugins(computerID: Int, plugins: [AudioPlugin]) async throws {
         var req = try makeRequest("computers/\(computerID)/sync_plugins", method: "POST")
-        let body: [String: Any] = [
-            "plugins": plugins.map {
-                [
-                    "name": $0.name,
-                    "manufacturer": $0.manufacturer,
-                    "plugin_type": $0.type.rawValue,
-                    "version": $0.version ?? "",
-                ]
-            }
-        ]
+        let body: [String: Any] = ["plugins": pluginSyncPayload(plugins)]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let _: OkResponse = try await decode(perform: req)
+    }
+
+    static func pluginSyncPayload(_ plugins: [AudioPlugin]) -> [[String: String]] {
+        plugins.map {
+            [
+                "name": $0.name,
+                "manufacturer": $0.manufacturer,
+                "plugin_type": $0.type.rawValue,
+                "version": $0.version ?? "",
+                "category": $0.category?.rawValue ?? "",
+            ]
+        }
     }
 
     /// Every computer registered on the signed-in account (this one included).
