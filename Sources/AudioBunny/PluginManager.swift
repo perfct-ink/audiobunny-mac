@@ -159,6 +159,8 @@ class PluginManager: ObservableObject {
 
         plugins = deduped.sorted { $0.name < $1.name }
         isScanning = false
+        hasCompletedScan = true
+        drainOpenedBundles()
     }
 
     // MARK: - Category Overrides (user-assigned, persisted across launches)
@@ -694,6 +696,99 @@ class PluginManager: ObservableObject {
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         guard let data = try? JSONEncoder().encode(map) else { return }
         try? data.write(to: url, options: .atomic)
+    }
+
+    // MARK: - Opening bundles from Finder
+
+    /// Set when a bundle opened from Finder matches a plugin in the list —
+    /// ContentView switches to My Plugins and selects it, then clears this.
+    @Published var pluginToReveal: AudioPlugin?
+    /// Bundles opened from outside the plug-in folders, waiting on the user to
+    /// confirm installing them. ContentView shows one prompt at a time.
+    @Published var installOffers: [PluginInstallOffer] = []
+    @Published var openBundleError: String?
+
+    private var hasCompletedScan = false
+    private var pendingOpenedBundles: [URL] = []
+
+    /// A `.component`, `.vst` or `.vst3` opened from Finder (double-click,
+    /// Open With, or dropped on the Dock icon). One already in the plug-in
+    /// folders is shown in My Plugins; one from anywhere else (Downloads, a
+    /// mounted installer DMG) is offered for install into the user folder.
+    func openBundle(at url: URL) {
+        guard PluginType(bundleExtension: url.pathExtension) != nil else { return }
+        // Matching needs a finished scan — at launch the open arrives before the
+        // first one even starts. Queue it and handle it once the list is in.
+        guard hasCompletedScan, !isScanning else {
+            pendingOpenedBundles.append(url)
+            return
+        }
+        handleOpenedBundle(url)
+    }
+
+    private func drainOpenedBundles() {
+        let urls = pendingOpenedBundles
+        pendingOpenedBundles = []
+        for url in urls { handleOpenedBundle(url) }
+    }
+
+    private func handleOpenedBundle(_ url: URL) {
+        guard let type = PluginType(bundleExtension: url.pathExtension) else { return }
+        if let plugin = installedPlugin(atBundle: url) {
+            pluginToReveal = plugin
+            return
+        }
+        if isSafePluginPath(url) {
+            // Already in a plug-in folder, but the scan didn't list it — usually
+            // an AU macOS hasn't registered (or refused to load).
+            openBundleError = "\(url.lastPathComponent) is already in \(url.deletingLastPathComponent().path), but it didn't show up in the plugin scan. If it's an Audio Unit, macOS may not have registered it yet — try Refresh in a moment."
+            return
+        }
+        let destination = restoreDestination(for: type).appendingPathComponent(url.lastPathComponent)
+        let offer = PluginInstallOffer(source: url, type: type, destination: destination,
+                                       replacesExisting: FileManager.default.fileExists(atPath: destination.path))
+        if !installOffers.contains(where: { $0.source == offer.source }) {
+            installOffers.append(offer)
+        }
+    }
+
+    /// The listed plugin whose bundle is the file at `url`, if any. Compared on
+    /// resolved paths so a symlinked or `..`-laden path still matches.
+    func installedPlugin(atBundle url: URL) -> AudioPlugin? {
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        return plugins.first { $0.fileURL.resolvingSymlinksInPath().standardizedFileURL.path == path }
+    }
+
+    func dismissInstallOffer(_ offer: PluginInstallOffer) {
+        installOffers.removeAll { $0.id == offer.id }
+    }
+
+    /// Copies the bundle into the user plug-ins folder for its format (never
+    /// moves it — the original might be on a read-only DMG), rescans, and
+    /// selects it. A same-named bundle already there goes to the Trash first,
+    /// so replacing is recoverable.
+    func install(_ offer: PluginInstallOffer) {
+        dismissInstallOffer(offer)
+        Task {
+            let fm = FileManager.default
+            do {
+                try fm.createDirectory(at: offer.destination.deletingLastPathComponent(),
+                                       withIntermediateDirectories: true)
+                if fm.fileExists(atPath: offer.destination.path) {
+                    try fm.trashItem(at: offer.destination, resultingItemURL: nil)
+                }
+                try fm.copyItem(at: offer.source, to: offer.destination)
+            } catch {
+                openBundleError = "Couldn't install \(offer.source.lastPathComponent): \(error.localizedDescription)"
+                return
+            }
+            await scan()
+            if let plugin = installedPlugin(atBundle: offer.destination) {
+                pluginToReveal = plugin
+            } else {
+                openBundleError = "Installed \(offer.source.lastPathComponent) to \(offer.destination.deletingLastPathComponent().path), but it didn't show up in the scan yet. Audio Units can take a moment for macOS to register — try Refresh shortly."
+            }
+        }
     }
 
     // MARK: - Delete (Uninstall)

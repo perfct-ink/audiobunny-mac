@@ -45,6 +45,13 @@ struct AudioBunnyApp: App {
                 // directly by ASWebAuthenticationSession and never reaches
                 // this handler at all, so there's no overlap to guard against.
                 .onOpenURL { url in
+                    // A .component / .vst / .vst3 opened from Finder (see
+                    // CFBundleDocumentTypes in Info.plist).
+                    if url.isFileURL {
+                        NSApp.activate(ignoringOtherApps: true)
+                        pluginManager.openBundle(at: url)
+                        return
+                    }
                     guard url.scheme == "audiobunny" else { return }
                     NSApp.activate(ignoringOtherApps: true)
                     guard url.host == "sync", presetManager.currentUser != nil else { return }
@@ -52,6 +59,9 @@ struct AudioBunnyApp: App {
                         await computerSyncManager.syncNow(pluginManager: pluginManager, liveProjectManager: liveProjectManager)
                     }
                 }
+                // Route opened files and URLs to the existing window instead of
+                // SwiftUI opening a new window for each one.
+                .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unifiedCompact)

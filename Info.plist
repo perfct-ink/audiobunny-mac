@@ -35,6 +35,54 @@
             </array>
         </dict>
     </array>
+    <!-- Plugin bundles: double-clicking (or Open With) one shows it in My
+         Plugins, or offers to install it if it isn't in a plug-ins folder —
+         see PluginManager.openBundle(at:). -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Audio Unit Plug-In</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>component</string>
+            </array>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Default</string>
+            <key>LSTypeIsPackage</key>
+            <true/>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>VST Plug-In</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>vst</string>
+            </array>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Default</string>
+            <key>LSTypeIsPackage</key>
+            <true/>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>VST3 Plug-In</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>vst3</string>
+            </array>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Default</string>
+            <key>LSTypeIsPackage</key>
+            <true/>
+        </dict>
+    </array>
     <!-- Google OAuth "iOS"-type client registered to accept the
          audiobunny://oauth-callback/google redirect above — see GoogleOAuth.swift.
          Fill these in from Google Cloud Console; sign-in with Google throws

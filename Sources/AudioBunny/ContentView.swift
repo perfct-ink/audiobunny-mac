@@ -92,6 +92,59 @@ struct ContentView: View {
             guard !scanning, presetManager.currentUser != nil else { return }
             Task { await computerSyncManager.reportPlugins(pluginManager: manager) }
         }
+        // A plugin bundle opened from Finder that's in the list — see
+        // PluginManager.openBundle(at:).
+        .onChange(of: manager.pluginToReveal) { plugin in
+            guard let plugin else { return }
+            reveal(plugin)
+            manager.pluginToReveal = nil
+        }
+        .alert(
+            installOfferTitle,
+            isPresented: Binding(
+                get: { manager.installOffers.first != nil },
+                // Both buttons remove their own offer; clearing `first` here
+                // too would drop the next queued offer along with it.
+                set: { _ in }
+            ),
+            presenting: manager.installOffers.first
+        ) { offer in
+            Button(offer.replacesExisting ? "Replace" : "Install") { manager.install(offer) }
+            Button("Cancel", role: .cancel) { manager.dismissInstallOffer(offer) }
+        } message: { offer in
+            Text(offer.replacesExisting
+                 ? "A plugin named \(offer.source.lastPathComponent) is already in \(offer.destination.deletingLastPathComponent().path). The installed copy will be moved to the Trash and replaced with this one."
+                 : "AudioBunny will copy it to \(offer.destination.deletingLastPathComponent().path), where your DAWs will find it.")
+        }
+        .alert(
+            "Couldn't Open Plugin",
+            isPresented: Binding(
+                get: { manager.openBundleError != nil },
+                set: { if !$0 { manager.openBundleError = nil } }
+            ),
+            presenting: manager.openBundleError
+        ) { _ in
+            Button("OK") { manager.openBundleError = nil }
+        } message: { message in
+            Text(message)
+        }
+    }
+
+    private var installOfferTitle: String {
+        guard let offer = manager.installOffers.first else { return "" }
+        return "Install \(offer.source.deletingPathExtension().lastPathComponent) (\(offer.type.rawValue))?"
+    }
+
+    /// Switches to My Plugins and selects `plugin`, clearing any search or
+    /// filter that would hide it from the list.
+    private func reveal(_ plugin: AudioPlugin) {
+        activeTab = .library
+        if !manager.filteredPlugins.contains(plugin) {
+            manager.searchText = ""
+            manager.filterType = nil
+            manager.filterStatus = .all
+        }
+        selectedPlugin = plugin
     }
 
     @ViewBuilder

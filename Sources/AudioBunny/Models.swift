@@ -16,6 +16,23 @@ enum PluginType: String, CaseIterable {
         case .vst3: return "vst3"
         }
     }
+
+    /// The format a bundle with this extension holds, e.g. "component" → AU.
+    init?(bundleExtension ext: String) {
+        guard let type = PluginType.allCases.first(where: { $0.fileExtension == ext.lowercased() }) else { return nil }
+        self = type
+    }
+}
+
+/// A plugin bundle opened from outside the plug-in folders, which AudioBunny
+/// offers to install by copying it into the user folder for its format.
+struct PluginInstallOffer: Identifiable, Equatable {
+    let id = UUID()
+    let source: URL
+    let type: PluginType
+    let destination: URL
+    /// A bundle with the same name is already at `destination`.
+    let replacesExisting: Bool
 }
 
 enum PluginStatus: Sendable {
