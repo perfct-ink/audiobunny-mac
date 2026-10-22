@@ -304,8 +304,8 @@ class LiveProjectManager: ObservableObject {
         await withTaskGroup(of: (URL, LiveProject?).self) { group in
             for fileURL in alsURLs where !cloudURLs.contains(fileURL) {
                 group.addTask {
-                    (fileURL, await parseAbletonProjectThrottled(at: fileURL) { [weak self] in
-                        self?.markScanning(fileURL, folderID: folderID)
+                    (fileURL, await parseAbletonProjectThrottled(at: fileURL) {
+                        self.markScanning(fileURL, folderID: folderID)
                     })
                 }
             }
