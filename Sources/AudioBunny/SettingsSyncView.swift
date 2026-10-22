@@ -167,7 +167,7 @@ struct SettingsSyncView: View {
                     .buttonStyle(.bordered)
                     .disabled(locked || !syncManager.isAvailable(provider))
                     .help(syncManager.isAvailable(provider)
-                          ? "Use an “AudioBunny Settings” folder in \(provider.displayName)"
+                          ? "Use an “AudioBunny/Settings” folder in \(provider.displayName)"
                           : "\(provider.displayName) isn't set up on this Mac")
             }
             Button("Choose Folder…") { showDestinationPicker = true }

@@ -59,9 +59,10 @@ func dropboxRootCandidates(home: URL) -> [URL] {
     return result
 }
 
-/// Where AudioBunny suggests putting settings inside iCloud Drive / Dropbox.
+/// Where AudioBunny suggests putting settings inside iCloud Drive / Dropbox:
+/// a "Settings" folder inside an "AudioBunny" folder.
 func suggestedSettingsDestination(providerRoot: URL) -> URL {
-    providerRoot.appendingPathComponent("AudioBunny Settings")
+    providerRoot.appendingPathComponent("AudioBunny/Settings", isDirectory: true)
 }
 
 // MARK: - Items
@@ -593,11 +594,13 @@ func recordedSettingsName(for relativePath: String, manifest: [String: String]) 
     manifest.filter { $0.value == relativePath }.keys.sorted().first
 }
 
-/// A name for `relativePath` in the destination that isn't taken. It's the
-/// folder's own name when free; when a folder by that name is already there,
-/// the new one goes beside it as a sibling — "Name (Parent)", then "Name 2",
+/// A name for `relativePath` in the destination that isn't taken. It's
+/// `preferredName` (the app's name, say) or else the folder's own name when
+/// free; when a folder by that name is already there, the new one goes beside
+/// it as a sibling — "Name (Folder)" or "Name (Parent)", then "Name 2",
 /// "Name 3"… — and the existing folder is left alone.
-func newSettingsName(for relativePath: String, destination: URL, manifest: [String: String]) -> String {
+func newSettingsName(for relativePath: String, preferredName: String? = nil,
+                     destination: URL, manifest: [String: String]) -> String {
     let fm = FileManager.default
     func isFree(_ name: String) -> Bool {
         let path = destination.appendingPathComponent(name).path
@@ -605,14 +608,37 @@ func newSettingsName(for relativePath: String, destination: URL, manifest: [Stri
             && !fm.fileExists(atPath: path)
             && (try? fm.destinationOfSymbolicLink(atPath: path)) == nil
     }
-    let base = (relativePath as NSString).lastPathComponent
+    let folder = (relativePath as NSString).lastPathComponent
     let parent = ((relativePath as NSString).deletingLastPathComponent as NSString).lastPathComponent
+    let preferred = preferredName.map(settingsFolderName).flatMap { $0.isEmpty ? nil : $0 }
+    let base = preferred ?? folder
     var candidates = [base]
-    if !parent.isEmpty { candidates.append("\(base) (\(parent))") }
+    if base != folder {
+        candidates.append("\(base) (\(folder))")
+    } else if !parent.isEmpty {
+        candidates.append("\(base) (\(parent))")
+    }
     if let free = candidates.first(where: isFree) { return free }
     var n = 2
     while !isFree("\(base) \(n)") { n += 1 }
     return "\(base) \(n)"
+}
+
+/// `name` made safe to use as one folder name: no slashes or colons, no
+/// leading dots, trimmed.
+func settingsFolderName(_ name: String) -> String {
+    var cleaned = name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    while cleaned.hasPrefix(".") { cleaned.removeFirst() }
+    return cleaned
+}
+
+/// What to call `item`'s folder in the destination: the app's name for audio
+/// apps and hand-added folders (so Ableton's User Library lands in
+/// "Settings/Ableton Live"). A plugin's folder keeps its own name, since one
+/// vendor folder (u-he, say) often holds settings for several plugins.
+func settingsFolderPreferredName(for item: AppSettingsItem) -> String? {
+    item.source == .plugin ? nil : item.owner
 }
 
 // MARK: - Status
@@ -864,7 +890,7 @@ final class AppSettingsSyncManager: ObservableObject {
         provider.rootFolder(home: home) != nil
     }
 
-    /// Points the destination at an "AudioBunny Settings" folder in iCloud
+    /// Points the destination at an "AudioBunny/Settings" folder in iCloud
     /// Drive or Dropbox.
     func useProvider(_ provider: CloudSyncProvider) {
         guard let root = provider.rootFolder(home: home) else {
@@ -1085,7 +1111,8 @@ final class AppSettingsSyncManager: ObservableObject {
         reloadManifest()
         let relative = item.relativePath
         let name = recordedSettingsName(for: relative, manifest: manifest)
-            ?? newSettingsName(for: relative, destination: destination, manifest: manifest)
+            ?? newSettingsName(for: relative, preferredName: settingsFolderPreferredName(for: item),
+                               destination: destination, manifest: manifest)
         let local = localURL(for: item)
         let remote = destination.appendingPathComponent(name)
         let home = self.home
