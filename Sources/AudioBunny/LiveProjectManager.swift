@@ -183,7 +183,16 @@ private func parseAbletonProjectThrottled(
 ) async -> LiveProject? {
     await ProjectScanLimiter.shared.acquire()
     if let onStart { await onStart() }
-    let work = Task.detached { try? parseAbletonProject(at: url) }
+    // Parse on a GCD thread: gunzip blocks its thread for up to a minute, and
+    // 10 of those on Swift's cooperative pool (one thread per core) would
+    // starve every other task, including the timeout and the limiter itself.
+    let work = Task.detached {
+        await withCheckedContinuation { (continuation: CheckedContinuation<LiveProject?, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: try? parseAbletonProject(at: url))
+            }
+        }
+    }
     Task.detached {
         _ = await work.value
         await ProjectScanLimiter.shared.release()

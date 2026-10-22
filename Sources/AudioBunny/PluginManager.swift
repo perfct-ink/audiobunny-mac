@@ -1040,12 +1040,23 @@ func runProcessWithTimeout(executable: String, arguments: [String], timeoutSecon
 
     guard (try? process.run()) != nil else { return nil }
 
-    if semaphore.wait(timeout: .now() + timeoutSeconds) == .timedOut {
-        kill(process.processIdentifier, SIGKILL)
-        return nil
+    // Drain stdout while the process runs. A pipe only buffers ~64KB, so a
+    // process with more output than that (e.g. gunzip on any real .als) blocks
+    // on write until someone reads, and would never exit on its own.
+    var data = Data()
+    let readDone = DispatchSemaphore(value: 0)
+    DispatchQueue.global(qos: .userInitiated).async {
+        data = pipe.fileHandleForReading.readDataToEndOfFile()
+        readDone.signal()
     }
 
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    if semaphore.wait(timeout: .now() + timeoutSeconds) == .timedOut {
+        kill(process.processIdentifier, SIGKILL)
+        // Don't wait on the reader: a child the process spawned could still
+        // hold the pipe open. It finishes on its own once that closes.
+        return nil
+    }
+    readDone.wait()
     try? pipe.fileHandleForReading.close()
     return data
 }
