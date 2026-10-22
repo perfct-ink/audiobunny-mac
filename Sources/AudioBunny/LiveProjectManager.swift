@@ -170,11 +170,28 @@ actor ProjectScanLimiter {
 
 /// Parses a single project's file, waiting for a free global slot first (see
 /// `ProjectScanLimiter`) so at most 10 parses run at once across all folders.
-private func parseAbletonProjectThrottled(at url: URL) async -> LiveProject? {
+/// `onStart` runs once the slot is acquired, i.e. when the project goes from
+/// queued to actually scanning.
+///
+/// The slot is held until the parse itself finishes, not just until the
+/// 60s timeout gives up waiting on it: a timed-out parse keeps running in its
+/// detached task (gunzip has its own kill timeout, XML parsing doesn't), and
+/// freeing its slot early would let more than 10 run at once.
+private func parseAbletonProjectThrottled(
+    at url: URL,
+    onStart: (@MainActor @Sendable () -> Void)? = nil
+) async -> LiveProject? {
     await ProjectScanLimiter.shared.acquire()
-    let result = await parseAbletonProjectWithTimeout(at: url, timeoutSeconds: 60)
-    await ProjectScanLimiter.shared.release()
-    return result
+    if let onStart { await onStart() }
+    let work = Task.detached { try? parseAbletonProject(at: url) }
+    Task.detached {
+        _ = await work.value
+        await ProjectScanLimiter.shared.release()
+    }
+    switch await withTimeout(seconds: 60, operation: { await work.value }) {
+    case .completed(let project): return project
+    case .timedOut: return LiveProject(url: url, plugins: [], timedOut: true)
+    }
 }
 
 // MARK: - Manager
@@ -287,7 +304,9 @@ class LiveProjectManager: ObservableObject {
         await withTaskGroup(of: (URL, LiveProject?).self) { group in
             for fileURL in alsURLs where !cloudURLs.contains(fileURL) {
                 group.addTask {
-                    (fileURL, await parseAbletonProjectThrottled(at: fileURL))
+                    (fileURL, await parseAbletonProjectThrottled(at: fileURL) { [weak self] in
+                        self?.markScanning(fileURL, folderID: folderID)
+                    })
                 }
             }
 
@@ -306,6 +325,7 @@ class LiveProjectManager: ObservableObject {
                         folders[idx3].projects[projIdx].plugins = project.plugins
                         folders[idx3].projects[projIdx].timedOut = project.timedOut
                         folders[idx3].projects[projIdx].pending = false
+                        folders[idx3].projects[projIdx].scanning = false
                         folders[idx3].scanFoundCount += 1
                     } else {
                         // Genuine parse failure (not a timeout) — drop the placeholder,
@@ -319,6 +339,15 @@ class LiveProjectManager: ObservableObject {
         guard let idx5 = folders.firstIndex(where: { $0.id == folderID }) else { return }
         folders[idx5].isScanning = false
         folders[idx5].scanCurrentFile = ""
+    }
+
+    /// Flips a queued project to "scanning" once its parse gets a limiter slot,
+    /// so the list only shows a spinner on the (at most 10) projects actually
+    /// being read and "Queued" on the rest.
+    private func markScanning(_ url: URL, folderID: UUID) {
+        guard let fIdx = folders.firstIndex(where: { $0.id == folderID }),
+              let pIdx = folders[fIdx].projects.firstIndex(where: { $0.url == url }) else { return }
+        folders[fIdx].projects[pIdx].scanning = true
     }
 
     /// Re-parses a single project's .als file in place, preserving its id

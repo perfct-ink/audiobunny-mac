@@ -176,6 +176,10 @@ struct LiveProject: Identifiable {
     /// finishes — all discovered projects appear in the list immediately
     /// (see LiveProjectManager.rescan), filling in as each one is scanned.
     var pending: Bool = false
+    /// True while this project's parse holds one of the 10 global scan slots
+    /// (see ProjectScanLimiter). A `pending` project that isn't `scanning` is
+    /// still queued.
+    var scanning: Bool = false
     /// True when the `.als` lives in iCloud / a File Provider and hasn't been
     /// downloaded to this Mac. It's listed but not parsed (reading it would pull
     /// down the whole file) until the user chooses to fetch it.

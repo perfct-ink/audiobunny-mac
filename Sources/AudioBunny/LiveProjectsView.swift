@@ -254,10 +254,15 @@ struct ProjectSidebarRow: View {
 
     var body: some View {
         HStack {
-            if project.pending {
+            if project.pending && project.scanning {
                 ProgressView()
                     .scaleEffect(0.4)
                     .frame(width: 16, height: 16)
+            } else if project.pending {
+                Image(systemName: "clock")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16)
+                    .help("Queued: up to 10 projects are scanned at a time")
             } else if project.notDownloaded {
                 Image(systemName: "icloud.and.arrow.down")
                     .foregroundStyle(.secondary)
@@ -277,7 +282,7 @@ struct ProjectSidebarRow: View {
                 Text(project.name)
                     .lineLimit(1)
                 let n = project.plugins.count
-                Text(project.pending ? "Scanning…"
+                Text(project.pending ? (project.scanning ? "Scanning…" : "Queued")
                      : (project.notDownloaded ? "In iCloud — not downloaded"
                         : (project.timedOut ? "Skipped (timed out)"
                            : (n == 0 ? "No plugins" : "\(n) plugin\(n == 1 ? "" : "s")"))))
