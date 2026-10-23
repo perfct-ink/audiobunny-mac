@@ -142,10 +142,11 @@ final class AppSettingsSyncTests: XCTestCase {
         XCTAssertEqual(paths("Ableton Live"), ["Music/Ableton/User Library"])
         XCTAssertEqual(paths("Bitwig Studio"), ["Documents/Bitwig Studio"])
         XCTAssertEqual(paths("Cubase 13"), ["Library/Preferences/Cubase 13"])
-        // A plugin-named folder inside the vendor's folder wins over the whole vendor folder…
-        XCTAssertEqual(paths("Pro-Q 3"), ["Library/Application Support/FabFilter/Pro-Q 3"])
-        // …otherwise the vendor folder is the plugin's settings location.
+        // Plugins grouped in their maker's folder sync that whole folder, never
+        // a plugin's folder inside it.
+        XCTAssertEqual(paths("Pro-Q 3"), ["Library/Application Support/FabFilter"])
         XCTAssertEqual(paths("Pro-L 2"), ["Library/Application Support/FabFilter"])
+        XCTAssertFalse(items.contains { $0.relativePath.hasPrefix("Library/Application Support/FabFilter/") })
         XCTAssertEqual(paths("Diva"), ["Library/Application Support/u-he"])
         XCTAssertEqual(paths("Valhalla Room"), ["Library/Preferences/Valhalla Room"])
         XCTAssertFalse(items.contains { $0.relativePath.hasSuffix("Some Other App") })
@@ -174,6 +175,72 @@ final class AppSettingsSyncTests: XCTestCase {
                        ["Library/Application Support/Valhalla DSP, LLC/ValhallaRoom"])
         XCTAssertEqual(items.first { $0.owner == "ValhallaRoom" }?.detail, "Valhalla settings")
         XCTAssertEqual(items.filter { $0.owner == "Diva" }.map(\.relativePath), ["Library/Application Support/u-he"])
+    }
+
+    func testNoDiscoveredFolderIsInsideAnother() throws {
+        let fm = FileManager.default
+        for path in ["Library/Application Support/Native Instruments/Massive X",
+                     "Library/Application Support/Native Instruments/Kontakt 7",
+                     "Library/Application Support/Valhalla DSP, LLC/ValhallaRoom"] {
+            try fm.createDirectory(at: home.appendingPathComponent(path), withIntermediateDirectories: true)
+        }
+        // An older catalog that still points inside the maker's folder.
+        let catalog = SettingsCatalog(version: 1, apps: [], pluginVendors: [
+            .init(manufacturer: "Native Instruments", paths: ["Library/Application Support/Native Instruments/{plugin}"]),
+        ])
+        let items = discoverAppSettingsItems(home: home, manifest: [:], plugins: [
+            (name: "Massive X", manufacturer: "Native Instruments"),
+            (name: "Kontakt 7", manufacturer: "Native Instruments"),
+            (name: "Monark", manufacturer: "Native Instruments"),
+            (name: "ValhallaRoom", manufacturer: "Valhalla DSP, LLC"),
+        ], catalog: catalog)
+        let paths = Set(items.map(\.relativePath))
+        for path in paths {
+            XCTAssertFalse(paths.contains { settingsPath(path, isInside: $0) }, "\(path) is inside another synced folder")
+        }
+        XCTAssertEqual(paths, ["Library/Application Support/Native Instruments",
+                               "Library/Application Support/Valhalla DSP, LLC"])
+        XCTAssertEqual(items.filter { $0.relativePath.hasSuffix("Native Instruments") }.map(\.owner),
+                       ["Massive X", "Kontakt 7", "Monark"])
+    }
+
+    func testBundledCatalogSyncsWholeMakerFolders() {
+        let paths = SettingsCatalog.bundled.pluginVendors.flatMap(\.paths)
+        XCTAssertTrue(paths.contains("Library/Application Support/Native Instruments"))
+        XCTAssertFalse(paths.contains { $0.contains("{plugin}") }, "plugin folders inside a maker's folder would nest")
+    }
+
+    func testCollapseKeepsLinkedItemsAndDropsWhatAnAppFolderCovers() {
+        let items = [
+            AppSettingsItem(owner: "Native Instruments", detail: "", relativePath: "Documents/Native Instruments"),
+            AppSettingsItem(owner: "Kontakt 7", detail: "", relativePath: "Documents/Native Instruments/Kontakt 7",
+                            source: .plugin),
+            AppSettingsItem(owner: "Diva", detail: "u-he", relativePath: "Library/Application Support/u-he",
+                            source: .plugin),
+            AppSettingsItem(owner: "Zebra", detail: "", relativePath: "Library/Application Support/u-he/Zebra",
+                            source: .plugin),
+            // Synced before folders were collapsed: still listed, so it can be unsynced.
+            AppSettingsItem(owner: "Repro", detail: "", relativePath: "Library/Application Support/u-he/Repro",
+                            source: .plugin),
+        ]
+        let collapsed = collapseNestedSettingsItems(items) { $0.hasSuffix("/Repro") }
+        XCTAssertEqual(collapsed.map(\.owner), ["Native Instruments", "Diva", "Zebra", "Repro"])
+        XCTAssertEqual(collapsed.first { $0.owner == "Zebra" }?.relativePath, "Library/Application Support/u-he")
+        XCTAssertEqual(collapsed.first { $0.owner == "Zebra" }?.detail, "u-he")
+        XCTAssertEqual(collapsed.first { $0.owner == "Repro" }?.relativePath, "Library/Application Support/u-he/Repro")
+    }
+
+    func testFolderWithSomethingSyncedInsideIsNotSuggested() {
+        let items = [
+            AppSettingsItem(owner: "Diva", detail: "", relativePath: "Library/Application Support/u-he", source: .plugin),
+            AppSettingsItem(owner: "Repro", detail: "", relativePath: "Library/Application Support/u-he/Repro",
+                            source: .plugin),
+            AppSettingsItem(owner: "Serum", detail: "", relativePath: "Library/Application Support/Xfer", source: .plugin),
+        ]
+        let suggestions = settingsSuggestions(items: items, status: {
+            $0.owner == "Repro" ? .synced : .notSynced(inDestination: false)
+        }, dismissed: [])
+        XCTAssertEqual(suggestions.map(\.item.owner), ["Serum"])
     }
 
     func testBundledCatalogLoadsAndOnlyListsSyncablePaths() throws {
@@ -556,6 +623,9 @@ final class AppSettingsSyncManagerTests: XCTestCase {
         first.chooseDestination(destination)
         XCTAssertTrue(first.addCustomItem(at: home.appendingPathComponent("Library/Application Support/Serum"), owner: "Serum"))
         XCTAssertFalse(first.addCustomItem(at: URL(fileURLWithPath: "/etc/hosts")))
+        // Inside a folder that's already listed: that folder covers it.
+        XCTAssertFalse(first.addCustomItem(at: home.appendingPathComponent("Library/Application Support/Serum/Presets")))
+        XCTAssertEqual(first.lastError, AppSettingsSyncError.insideListedFolder("Serum").errorDescription)
 
         let second = AppSettingsSyncManager(userDefaults: defaults, home: home, syncsToAccount: false)
         XCTAssertEqual(second.destination?.path, destination.path)

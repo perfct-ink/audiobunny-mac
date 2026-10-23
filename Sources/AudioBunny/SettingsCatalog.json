@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "apps": [
     {
       "name": "Ableton Live",
@@ -75,11 +75,11 @@
     },
     {
       "manufacturer": "Valhalla DSP",
-      "paths": ["Library/Application Support/Valhalla DSP, LLC/{plugin}"]
+      "paths": ["Library/Application Support/Valhalla DSP, LLC"]
     },
     {
       "manufacturer": "Native Instruments",
-      "paths": ["Library/Application Support/Native Instruments/{plugin}"]
+      "paths": ["Library/Application Support/Native Instruments"]
     }
   ]
 }

@@ -408,11 +408,9 @@ func discoverAppSettingsItems(home: URL, manifest: [String: String],
                 if folderMatchesPluginName(name, pluginName: plugin.name) {
                     paths.append(relative)
                 } else if vendorFolderMatches(folderName: name, manufacturer: plugin.manufacturer) {
-                    // A vendor folder that's already linked is synced as a
-                    // whole — don't offer pieces of it.
-                    let inner: [String] = isLink(relative) ? [] : childFolders(of: relative)
-                        .filter { folderMatchesPluginName($0, pluginName: plugin.name) }
-                    paths += inner.isEmpty ? [relative] : inner.map { "\(relative)/\($0)" }
+                    // The maker's whole folder, not the plugin's folder inside
+                    // it: one link covers all of that maker's plugins.
+                    paths.append(relative)
                 }
             }
         }
@@ -422,6 +420,39 @@ func discoverAppSettingsItems(home: URL, manifest: [String: String],
                                           detail: "\(plugin.manufacturer) · \(place)",
                                           relativePath: path, source: .plugin))
         }
+    }
+    return collapseNestedSettingsItems(result, isLinked: isLink)
+}
+
+/// Whether `path` is strictly inside `ancestor` (both home-relative).
+func settingsPath(_ path: String, isInside ancestor: String) -> Bool {
+    path.hasPrefix(ancestor + "/")
+}
+
+/// No synced folder may sit inside another, so an item inside another item's
+/// folder is folded into the topmost one: a plugin inside a plugin maker's
+/// folder becomes that folder (under the plugin's own name, so the list and
+/// suggestions show every plugin it covers); anything else inside another
+/// item's folder is dropped, since that folder already covers it. Items that
+/// are already links (`isLinked`) are kept as they are, so they can still be
+/// unsynced.
+func collapseNestedSettingsItems(_ items: [AppSettingsItem],
+                                 isLinked: (String) -> Bool) -> [AppSettingsItem] {
+    let paths = Set(items.map(\.relativePath))
+    func topmost(_ path: String) -> String? {
+        paths.filter { settingsPath(path, isInside: $0) }.min { $0.count < $1.count }
+    }
+    var seen = Set<String>()
+    var result: [AppSettingsItem] = []
+    for item in items {
+        var kept = item
+        if !isLinked(item.relativePath), let outerPath = topmost(item.relativePath),
+           let outer = items.first(where: { $0.relativePath == outerPath }) {
+            guard item.source == .plugin, outer.source == .plugin else { continue }
+            kept = AppSettingsItem(owner: item.owner, detail: outer.detail, relativePath: outerPath,
+                                   source: .plugin, fromCatalog: outer.fromCatalog || item.fromCatalog)
+        }
+        if seen.insert(kept.id).inserted { result.append(kept) }
     }
     return result
 }
@@ -476,6 +507,7 @@ enum AppSettingsSyncError: LocalizedError, Equatable {
     case containsLinks
     case insideLinkedFolder
     case alreadyLinkedElsewhere(String)
+    case insideListedFolder(String)
     case notLinked
 
     var errorDescription: String? {
@@ -500,6 +532,8 @@ enum AppSettingsSyncError: LocalizedError, Equatable {
             return "It's inside a folder that's already linked, so it's synced along with that folder."
         case .alreadyLinkedElsewhere(let path):
             return "Already linked to \(path) — remove that link by hand first."
+        case .insideListedFolder(let owner):
+            return "It's inside \(owner)'s folder, which already covers it — sync that instead."
         case .notLinked:
             return "This isn't currently synced."
         }
@@ -765,7 +799,16 @@ func settingsSuggestions(items: [AppSettingsItem],
                          dismissed: Set<String>) -> [SettingsSuggestion] {
     var byPath: [String: SettingsSuggestion] = [:]
     var order: [String] = []
+    // A folder with something already linked inside it can't be synced until
+    // that's unsynced (it would nest one sync in another).
+    let linkedPaths = items.filter {
+        switch status($0) {
+        case .synced, .linkedElsewhere: return true
+        default: return false
+        }
+    }.map(\.relativePath)
     for item in items where !item.isCustom && !dismissed.contains(item.relativePath) {
+        if linkedPaths.contains(where: { settingsPath($0, isInside: item.relativePath) }) { continue }
         guard case .notSynced(let inDestination) = status(item) else { continue }
         if item.source == .audioApp && item.appInstalled == false { continue }
         let reason: SettingsSuggestionReason
@@ -904,7 +947,10 @@ final class AppSettingsSyncManager: ObservableObject {
                 if seen.insert(item.id).inserted { result.append(item) }
             }
         }
-        return result
+        let home = self.home
+        return collapseNestedSettingsItems(result) {
+            (try? FileManager.default.destinationOfSymbolicLink(atPath: home.appendingPathComponent($0).path)) != nil
+        }
     }
 
     var destinationAvailable: Bool {
@@ -1078,6 +1124,11 @@ final class AppSettingsSyncManager: ObservableObject {
                 lastError = error.localizedDescription
                 return false
             }
+        }
+        // Synced folders never nest, so the folder that already covers it wins.
+        if let outer = items.first(where: { settingsPath(relative, isInside: $0.relativePath) }) {
+            lastError = AppSettingsSyncError.insideListedFolder(outer.owner).errorDescription
+            return false
         }
         var paths = customPaths[owner] ?? []
         if !paths.contains(relative) && !items.contains(where: { $0.owner == owner && $0.relativePath == relative }) {
