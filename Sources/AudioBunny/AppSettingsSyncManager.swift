@@ -146,9 +146,23 @@ struct SettingsCatalog: Codable, Equatable {
 
         func isInstalled(bundleNames: Set<String>) -> Bool? {
             guard let prefixes = appBundles, !prefixes.isEmpty else { return nil }
-            return bundleNames.contains { name in
-                prefixes.contains { name.range(of: $0, options: [.caseInsensitive, .anchored]) != nil }
+            return bundleNames.contains { matches(bundleName: $0, prefixes: prefixes) }
+        }
+
+        /// The installed .app this entry matches, for its icon: the first
+        /// prefix that matches wins ("Logic Pro" before "MainStage"), then the
+        /// alphabetically first bundle, so the pick stays the same.
+        func installedBundleURL(in bundles: [String: URL]) -> URL? {
+            for prefix in appBundles ?? [] {
+                if let name = bundles.keys.sorted().first(where: { matches(bundleName: $0, prefixes: [prefix]) }) {
+                    return bundles[name]
+                }
             }
+            return nil
+        }
+
+        private func matches(bundleName: String, prefixes: [String]) -> Bool {
+            prefixes.contains { bundleName.range(of: $0, options: [.caseInsensitive, .anchored]) != nil }
         }
     }
 
@@ -272,15 +286,22 @@ func defaultApplicationFolders(home: URL) -> [URL] {
 /// tucks into subfolders ("/Applications/Native Instruments/Kontakt 7/Kontakt
 /// 7.app"). Doesn't look inside app bundles.
 func installedAppBundleNames(in folders: [URL], depth: Int = 3) -> Set<String> {
+    Set(installedAppBundles(in: folders, depth: depth).keys)
+}
+
+/// Like `installedAppBundleNames`, with where each app is. When two folders
+/// hold an app with the same name, the earlier folder wins.
+func installedAppBundles(in folders: [URL], depth: Int = 3) -> [String: URL] {
     let fm = FileManager.default
-    var names = Set<String>()
+    var bundles: [String: URL] = [:]
     func scan(_ folder: URL, _ remaining: Int) {
-        for name in (try? fm.contentsOfDirectory(atPath: folder.path)) ?? [] where !name.hasPrefix(".") {
+        for name in ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).sorted() where !name.hasPrefix(".") {
+            let url = folder.appendingPathComponent(name)
             if name.hasSuffix(".app") {
-                names.insert(String(name.dropLast(4)))
+                let appName = String(name.dropLast(4))
+                if bundles[appName] == nil { bundles[appName] = url }
             } else if remaining > 1 {
                 var isDir: ObjCBool = false
-                let url = folder.appendingPathComponent(name)
                 if fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
                     scan(url, remaining - 1)
                 }
@@ -288,7 +309,23 @@ func installedAppBundleNames(in folders: [URL], depth: Int = 3) -> Set<String> {
         }
     }
     for folder in folders { scan(folder, depth) }
-    return names
+    return bundles
+}
+
+/// The installed .app behind each audio-app item, by owner, so the list can
+/// show its icon. Versioned folders ("Cubase 13") use their catalog app's
+/// bundle. Owners with no installed app are left out.
+func installedAppURLsByOwner(for items: [AppSettingsItem], catalog: SettingsCatalog,
+                             bundles: [String: URL]) -> [String: URL] {
+    var result: [String: URL] = [:]
+    for item in items where item.source == .audioApp && result[item.owner] == nil {
+        let app = catalog.apps.first { $0.name == item.owner }
+            ?? catalog.apps.first { app in (app.versionedFolders ?? []).contains { item.owner.hasPrefix($0.prefix) } }
+        if let url = app?.installedBundleURL(in: bundles) {
+            result[item.owner] = url
+        }
+    }
+    return result
 }
 
 /// Everything worth offering on this Mac: the catalog's audio apps and
@@ -825,6 +862,8 @@ final class AppSettingsSyncManager: ObservableObject {
     @Published private(set) var workingPaths: Set<String> = []
     /// Home-relative paths whose suggestion the user dismissed on this Mac.
     @Published private(set) var dismissedSuggestions: Set<String> = []
+    /// Audio app owner → its installed .app, for icons in the list.
+    @Published private(set) var appBundleURLs: [String: URL] = [:]
 
     let home: URL
     private let userDefaults: UserDefaults
@@ -932,11 +971,14 @@ final class AppSettingsSyncManager: ObservableObject {
         let manifest = self.manifest
         let catalog = self.catalog
         let applicationFolders = self.applicationFolders
-        let found = await Task.detached(priority: .userInitiated) {
-            discoverAppSettingsItems(home: home, manifest: manifest, plugins: plugins, catalog: catalog,
-                                     installedBundles: installedAppBundleNames(in: applicationFolders))
+        let (found, bundleURLs) = await Task.detached(priority: .userInitiated) {
+            let bundles = installedAppBundles(in: applicationFolders)
+            let found = discoverAppSettingsItems(home: home, manifest: manifest, plugins: plugins, catalog: catalog,
+                                                 installedBundles: Set(bundles.keys))
+            return (found, installedAppURLsByOwner(for: found, catalog: catalog, bundles: bundles))
         }.value
         discoveredItems = found
+        appBundleURLs = bundleURLs
         hasDiscovered = true
         isDiscovering = false
 

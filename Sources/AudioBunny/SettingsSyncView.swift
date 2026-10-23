@@ -24,6 +24,8 @@ struct SettingsSyncView: View {
     private struct InstalledPlugin: Hashable {
         let name: String
         let manufacturer: String
+        /// One of its bundles, for the icon.
+        let fileURL: URL
     }
 
     /// Installed plugins by name — the AU/VST2/VST3 builds of one plugin share settings.
@@ -32,7 +34,13 @@ struct SettingsSyncView: View {
         return pluginManager.plugins
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             .filter { seen.insert($0.name.lowercased()).inserted }
-            .map { InstalledPlugin(name: $0.name, manufacturer: $0.manufacturer) }
+            .map { InstalledPlugin(name: $0.name, manufacturer: $0.manufacturer, fileURL: $0.fileURL) }
+    }
+
+    /// The app or plugin bundle whose icon goes next to an owner's name.
+    private func iconURL(forOwner owner: String) -> URL? {
+        syncManager.appBundleURLs[owner]
+            ?? installedPlugins.first { $0.name == owner }?.fileURL
     }
 
     private func matchesSearch(_ text: String) -> Bool {
@@ -205,7 +213,8 @@ struct SettingsSyncView: View {
                 if !apps.isEmpty {
                     Section("Audio Apps") {
                         ForEach(apps) { item in
-                            SettingsSyncRow(item: item, title: item.owner, pendingAction: $pendingAction)
+                            SettingsSyncRow(item: item, title: item.owner, pendingAction: $pendingAction,
+                                            icon: .bundle(syncManager.appBundleURLs[item.owner], fallback: "app.dashed"))
                         }
                     }
                 }
@@ -225,6 +234,7 @@ struct SettingsSyncView: View {
                             }
                         } header: {
                             HStack {
+                                BundleIconView(url: plugin.fileURL, fallback: "puzzlepiece.extension")
                                 Text(plugin.name)
                                 Text(plugin.manufacturer).foregroundStyle(.secondary)
                                 Spacer()
@@ -244,7 +254,8 @@ struct SettingsSyncView: View {
                     Section("Added by You") {
                         ForEach(other) { item in
                             SettingsSyncRow(item: item, title: (item.relativePath as NSString).lastPathComponent,
-                                            pendingAction: $pendingAction)
+                                            pendingAction: $pendingAction,
+                                            icon: .bundle(syncManager.localURL(for: item), fallback: "folder"))
                         }
                     }
                 }
@@ -270,6 +281,8 @@ struct SettingsSyncView: View {
                     SettingsSyncRow(item: suggestion.item,
                                     title: suggestion.owners.joined(separator: ", "),
                                     pendingAction: $pendingAction,
+                                    icon: .bundle(suggestion.owners.lazy.compactMap(iconURL(forOwner:)).first,
+                                                  fallback: suggestion.item.source == .audioApp ? "app.dashed" : "puzzlepiece.extension"),
                                     note: suggestion.reason.label,
                                     onDismiss: { syncManager.dismissSuggestion(suggestion) })
                 }
@@ -356,6 +369,9 @@ struct SettingsSyncRow: View {
     let item: AppSettingsItem
     let title: String
     @Binding var pendingAction: SettingsSyncAction?
+    /// Shown before the title. Rows under a plugin's header leave it out,
+    /// since the header has the icon.
+    var icon: SettingsSyncRowIcon? = nil
     /// Why it's shown, for suggestions.
     var note: String? = nil
     /// Set for suggestions: hides this one.
@@ -366,6 +382,10 @@ struct SettingsSyncRow: View {
         let working = syncManager.isWorking(item)
 
         HStack(spacing: 10) {
+            if case .bundle(let url, let fallback) = icon {
+                BundleIconView(url: url, fallback: fallback, size: 24)
+            }
+
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(title).lineLimit(1)
@@ -464,5 +484,48 @@ struct SettingsSyncRow: View {
                 .font(.caption2).foregroundStyle(.orange)
                 .help("Currently linked to \(path)")
         }
+    }
+}
+
+// MARK: - Icons
+
+enum SettingsSyncRowIcon {
+    /// The Finder icon of an app, plugin, or folder, or `fallback` (an SF
+    /// Symbol) when there's no URL or nothing is there.
+    case bundle(URL?, fallback: String)
+}
+
+/// A file's Finder icon — an app's or plugin's own icon — falling back to an
+/// SF Symbol when the file isn't on this Mac.
+struct BundleIconView: View {
+    let url: URL?
+    let fallback: String
+    var size: CGFloat = 16
+
+    var body: some View {
+        Group {
+            if let image = url.flatMap(BundleIconCache.icon(for:)) {
+                Image(nsImage: image).resizable().interpolation(.high)
+            } else {
+                Image(systemName: fallback)
+                    .font(.system(size: size * 0.7))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// NSWorkspace icons by path, so redrawing the list doesn't go back to disk.
+enum BundleIconCache {
+    private static let icons = NSCache<NSString, NSImage>()
+
+    static func icon(for url: URL) -> NSImage? {
+        let path = url.path
+        if let icon = icons.object(forKey: path as NSString) { return icon }
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        let icon = NSWorkspace.shared.icon(forFile: path)
+        icons.setObject(icon, forKey: path as NSString)
+        return icon
     }
 }

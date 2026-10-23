@@ -216,6 +216,39 @@ final class AppSettingsSyncTests: XCTestCase {
                        ["Ableton Live 12 Suite", "Kontakt 7"])
     }
 
+    func testInstalledAppBundlesRecordWhereEachAppIs() throws {
+        let fm = FileManager.default
+        let apps = home.appendingPathComponent("Applications")
+        let kontakt = apps.appendingPathComponent("Native Instruments/Kontakt 7/Kontakt 7.app")
+        try fm.createDirectory(at: kontakt, withIntermediateDirectories: true)
+        let bundles = installedAppBundles(in: [apps])
+        XCTAssertEqual(bundles["Kontakt 7"]?.standardizedFileURL, kontakt.standardizedFileURL)
+    }
+
+    func testAppIconURLsComeFromTheMatchingInstalledBundle() {
+        let catalog = SettingsCatalog(version: 1, apps: [
+            SettingsCatalog.App(name: "Logic Pro & MainStage", detail: "", paths: ["Music/Audio Music Apps"],
+                                appBundles: ["Logic Pro", "MainStage"]),
+            SettingsCatalog.App(name: "Cubase", detail: "", paths: [],
+                                versionedFolders: [.init(parent: "Library/Preferences", prefix: "Cubase ")],
+                                appBundles: ["Cubase"]),
+            SettingsCatalog.App(name: "Bitwig Studio", detail: "", paths: ["Documents/Bitwig Studio"],
+                                appBundles: ["Bitwig Studio"]),
+        ], pluginVendors: [])
+        let logic = URL(fileURLWithPath: "/Applications/Logic Pro.app")
+        let cubase = URL(fileURLWithPath: "/Applications/Cubase 13.app")
+        let bundles = ["MainStage": URL(fileURLWithPath: "/Applications/MainStage.app"),
+                       "Logic Pro": logic, "Cubase 13": cubase]
+        let items = [
+            AppSettingsItem(owner: "Logic Pro & MainStage", detail: "", relativePath: "Music/Audio Music Apps"),
+            AppSettingsItem(owner: "Cubase 13", detail: "", relativePath: "Library/Preferences/Cubase 13"),
+            AppSettingsItem(owner: "Bitwig Studio", detail: "", relativePath: "Documents/Bitwig Studio"),
+            AppSettingsItem(owner: "Serum", detail: "", relativePath: "Documents/Xfer", source: .plugin),
+        ]
+        XCTAssertEqual(installedAppURLsByOwner(for: items, catalog: catalog, bundles: bundles),
+                       ["Logic Pro & MainStage": logic, "Cubase 13": cubase])
+    }
+
     func testAppIsInstalledWhenABundleNameStartsWithAPrefix() {
         let live = SettingsCatalog.App(name: "Ableton Live", detail: "", paths: [], appBundles: ["Ableton Live"])
         XCTAssertEqual(live.isInstalled(bundleNames: ["ableton live 12 suite"]), true)
