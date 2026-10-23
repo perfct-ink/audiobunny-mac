@@ -15,6 +15,7 @@ struct AudioBunnyApp: App {
     @StateObject private var liveProjectManager = LiveProjectManager()
     @StateObject private var sampleManager = SampleManager()
     @StateObject private var computerSyncManager = ComputerSyncManager()
+    @StateObject private var dropInstallManager = DropInstallManager()
 
     var body: some Scene {
         // Empty title + .unifiedCompact: shrinks the real title bar down to
@@ -32,6 +33,7 @@ struct AudioBunnyApp: App {
                 .environmentObject(liveProjectManager)
                 .environmentObject(sampleManager)
                 .environmentObject(computerSyncManager)
+                .environmentObject(dropInstallManager)
                 .frame(minWidth: 900, minHeight: 600)
                 .task {
                     downloadManager.pluginManager = pluginManager

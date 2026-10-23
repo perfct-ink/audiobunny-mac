@@ -40,6 +40,7 @@ struct ContentView: View {
     @EnvironmentObject var liveProjectManager: LiveProjectManager
     @EnvironmentObject var computerSyncManager: ComputerSyncManager
     @State private var selectedPlugin: AudioPlugin? = nil
+    @AppStorage("audiobunny.hasSeenDropHint") private var hasSeenDropHint = false
     @State private var showAccountSheet = false
     @State private var showComputersSheet = false
     @AppStorage("audiobunny.activeTab") private var activeTab: AppTab = .browse
@@ -47,6 +48,11 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             MainTabBar(activeTab: $activeTab)
+
+            if !hasSeenDropHint {
+                DropInstallHint { hasSeenDropHint = true }
+                Divider()
+            }
 
             Group {
                 switch activeTab {
@@ -67,6 +73,8 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .removeSidebarToggle()
+        // Plugins and presets dropped anywhere on the window — see DropInstallManager.
+        .modifier(DropInstallTarget(onDrop: { hasSeenDropHint = true }))
         .toolbar {
             if presetManager.currentUser != nil {
                 ToolbarItem(placement: .primaryAction) {
