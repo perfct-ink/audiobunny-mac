@@ -753,6 +753,40 @@ func appSettingsStatus(local: URL, remote: URL?) -> AppSettingsSyncStatus {
     return .notSynced(inDestination: false)
 }
 
+// MARK: - Plugins by brand
+
+/// Installed plugins from one maker, for the Plugins part of the list.
+struct PluginBrandGroup: Equatable {
+    let brand: String
+    let plugins: [String]
+}
+
+/// Brand name for plugins that don't say who made them.
+let unknownPluginBrand = "Other Plugins"
+
+/// Plugins grouped by maker, brands A–Z with plugins A–Z inside each. Spellings
+/// of one maker are one brand ("Native Instruments GmbH" joins "Native
+/// Instruments"), shown by its shortest spelling. Plugins with no maker go last.
+func groupPluginsByBrand(_ plugins: [(name: String, manufacturer: String)]) -> [PluginBrandGroup] {
+    var spellings: [String: [String]] = [:]
+    var names: [String: [String]] = [:]
+    for plugin in plugins {
+        let maker = plugin.manufacturer.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = vendorMatchKey(maker).isEmpty ? maker.lowercased() : vendorMatchKey(maker)
+        if !maker.isEmpty { spellings[key, default: []].append(maker) }
+        if !names[key, default: []].contains(plugin.name) { names[key, default: []].append(plugin.name) }
+    }
+    func ascending(_ a: String, _ b: String) -> Bool { a.localizedStandardCompare(b) == .orderedAscending }
+    let groups = names.map { key, plugins in
+        PluginBrandGroup(brand: spellings[key]?.min { ($0.count, $0) < ($1.count, $1) } ?? unknownPluginBrand,
+                         plugins: plugins.sorted(by: ascending))
+    }
+    return groups.sorted { a, b in
+        let aUnknown = a.brand == unknownPluginBrand, bUnknown = b.brand == unknownPluginBrand
+        return aUnknown != bUnknown ? bUnknown : ascending(a.brand, b.brand)
+    }
+}
+
 // MARK: - Suggestions
 
 /// Why an item is suggested, strongest first.

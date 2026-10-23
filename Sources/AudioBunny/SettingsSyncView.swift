@@ -211,42 +211,26 @@ struct SettingsSyncView: View {
 
                 let apps = syncManager.items.filter { $0.source == .audioApp && matchesSearch($0.owner) }
                 if !apps.isEmpty {
-                    Section("Audio Apps") {
+                    Section {
                         ForEach(apps) { item in
                             SettingsSyncRow(item: item, title: item.owner, pendingAction: $pendingAction,
                                             icon: .bundle(syncManager.appBundleURLs[item.owner], fallback: "app.dashed"))
                         }
+                    } header: {
+                        Text("Apps").font(.headline)
                     }
                 }
 
-                ForEach(installedPlugins.filter { matchesSearch($0.name) || matchesSearch($0.manufacturer) },
-                        id: \.self) { plugin in
-                    let rows = syncManager.items.filter { $0.owner == plugin.name && $0.source != .audioApp }
-                    if !rows.isEmpty || !hideEmptyPlugins {
-                        Section {
-                            if rows.isEmpty {
-                                Text("No settings folder found").font(.caption).foregroundStyle(.secondary)
-                            }
-                            ForEach(rows) { item in
-                                SettingsSyncRow(item: item,
-                                                title: (item.relativePath as NSString).lastPathComponent,
-                                                pendingAction: $pendingAction)
-                            }
-                        } header: {
-                            HStack {
-                                BundleIconView(url: plugin.fileURL, fallback: "puzzlepiece.extension")
-                                Text(plugin.name)
-                                Text(plugin.manufacturer).foregroundStyle(.secondary)
-                                Spacer()
-                                Button("Add Folder…") {
-                                    addingFor = plugin.name
-                                    showItemPicker = true
-                                }
-                                .buttonStyle(.link)
-                                .font(.caption)
-                            }
-                        }
+                let brands = visiblePluginBrands
+                if !brands.isEmpty {
+                    Section {
+                        EmptyView()
+                    } header: {
+                        Text("Plugins").font(.headline)
                     }
+                }
+                ForEach(brands, id: \.group.brand) { brand in
+                    pluginBrandSection(brand.group, rows: brand.rows, withoutSettings: brand.withoutSettings)
                 }
 
                 let other = syncManager.items.filter { $0.owner == otherSettingsOwner && matchesSearch($0.relativePath) }
@@ -261,6 +245,82 @@ struct SettingsSyncView: View {
                 }
             }
             .listStyle(.inset)
+        }
+    }
+
+    // MARK: Plugins
+
+    /// One settings folder and every plugin of a brand it covers.
+    private struct PluginFolderRow: Identifiable {
+        let item: AppSettingsItem
+        var owners: [String]
+        var id: String { item.relativePath }
+    }
+
+    private struct PluginBrandRows {
+        let group: PluginBrandGroup
+        /// One row per settings folder, with every plugin of this brand it covers.
+        let rows: [PluginFolderRow]
+        /// This brand's plugins with no settings folder found.
+        let withoutSettings: [String]
+    }
+
+    /// Installed plugins by brand (A–Z) that match the search, with their
+    /// settings folders. A brand matching the search shows all its plugins.
+    private var visiblePluginBrands: [PluginBrandRows] {
+        let items = syncManager.items.filter { $0.source != .audioApp && $0.owner != otherSettingsOwner }
+        return groupPluginsByBrand(installedPlugins.map { (name: $0.name, manufacturer: $0.manufacturer) })
+            .compactMap { group in
+                let plugins = matchesSearch(group.brand) ? group.plugins : group.plugins.filter(matchesSearch)
+                guard !plugins.isEmpty else { return nil }
+                // Folders added by hand under the brand's own name belong here too.
+                let owners = Set(plugins + [group.brand])
+                var rows: [PluginFolderRow] = []
+                for item in items where owners.contains(item.owner) {
+                    if let index = rows.firstIndex(where: { $0.item.relativePath == item.relativePath }) {
+                        if !rows[index].owners.contains(item.owner) { rows[index].owners.append(item.owner) }
+                    } else {
+                        rows.append(PluginFolderRow(item: item, owners: [item.owner]))
+                    }
+                }
+                let covered = Set(rows.flatMap(\.owners))
+                let withoutSettings = plugins.filter { !covered.contains($0) }
+                guard !rows.isEmpty || (!hideEmptyPlugins && !withoutSettings.isEmpty) else { return nil }
+                return PluginBrandRows(group: PluginBrandGroup(brand: group.brand, plugins: plugins),
+                                       rows: rows, withoutSettings: hideEmptyPlugins ? [] : withoutSettings)
+            }
+    }
+
+    private func pluginBrandSection(_ group: PluginBrandGroup, rows: [PluginFolderRow],
+                                    withoutSettings: [String]) -> some View {
+        Section {
+            ForEach(rows) { row in
+                SettingsSyncRow(item: row.item,
+                                title: row.owners.filter { $0 != group.brand }.joined(separator: ", ")
+                                    .nilIfEmpty ?? (row.item.relativePath as NSString).lastPathComponent,
+                                pendingAction: $pendingAction,
+                                icon: .bundle(row.owners.lazy.compactMap(iconURL(forOwner:)).first,
+                                              fallback: "puzzlepiece.extension"))
+            }
+            if !withoutSettings.isEmpty {
+                Text("No settings folder found for \(withoutSettings.joined(separator: ", "))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        } header: {
+            HStack {
+                Text(group.brand)
+                Text(group.plugins.count == 1 ? "1 plugin" : "\(group.plugins.count) plugins")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if group.brand != unknownPluginBrand {
+                    Button("Add Folder…") {
+                        addingFor = group.brand
+                        showItemPicker = true
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                }
+            }
         }
     }
 
@@ -355,6 +415,10 @@ struct SettingsSyncAction {
     }
 }
 
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
 /// Above this, the UI calls out how much will be moved.
 let largeItemBytes: Int64 = 1_000_000_000
 
@@ -369,8 +433,7 @@ struct SettingsSyncRow: View {
     let item: AppSettingsItem
     let title: String
     @Binding var pendingAction: SettingsSyncAction?
-    /// Shown before the title. Rows under a plugin's header leave it out,
-    /// since the header has the icon.
+    /// Shown before the title.
     var icon: SettingsSyncRowIcon? = nil
     /// Why it's shown, for suggestions.
     var note: String? = nil

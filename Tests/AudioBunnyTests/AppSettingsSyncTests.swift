@@ -102,6 +102,24 @@ final class AppSettingsSyncTests: XCTestCase {
         XCTAssertFalse(vendorFolderMatches(folderName: "FabFilter", manufacturer: "Xfer Records"))
     }
 
+    func testPluginsGroupByBrandAlphabetically() {
+        let groups = groupPluginsByBrand([
+            (name: "Pro-Q 3", manufacturer: "FabFilter"),
+            (name: "Massive X", manufacturer: "Native Instruments GmbH"),
+            (name: "Kontakt 7", manufacturer: "Native Instruments"),
+            (name: "Mystery", manufacturer: ""),
+            (name: "Diva", manufacturer: "u-he"),
+            (name: "Pro-L 2", manufacturer: "FabFilter"),
+            (name: "Pro-Q 3", manufacturer: "FabFilter"),
+        ])
+        XCTAssertEqual(groups, [
+            PluginBrandGroup(brand: "FabFilter", plugins: ["Pro-L 2", "Pro-Q 3"]),
+            PluginBrandGroup(brand: "Native Instruments", plugins: ["Kontakt 7", "Massive X"]),
+            PluginBrandGroup(brand: "u-he", plugins: ["Diva"]),
+            PluginBrandGroup(brand: unknownPluginBrand, plugins: ["Mystery"]),
+        ])
+    }
+
     func testPluginNameMatching() {
         XCTAssertTrue(folderMatchesPluginName("ValhallaRoom", pluginName: "Valhalla Room"))
         XCTAssertTrue(folderMatchesPluginName("Pro-Q 3", pluginName: "Pro-Q 3"))
