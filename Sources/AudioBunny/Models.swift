@@ -24,10 +24,9 @@ enum PluginType: String, CaseIterable {
     }
 }
 
-/// A plugin bundle opened from outside the plug-in folders, which AudioBunny
-/// offers to install by copying it into the user folder for its format.
-struct PluginInstallOffer: Identifiable, Equatable {
-    let id = UUID()
+/// Installing a plugin bundle opened from Finder: copying it into the user
+/// plug-ins folder for its format.
+struct PluginInstallOffer: Equatable {
     let source: URL
     let type: PluginType
     let destination: URL

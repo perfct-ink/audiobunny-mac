@@ -700,25 +700,21 @@ class PluginManager: ObservableObject {
 
     // MARK: - Opening bundles from Finder
 
-    /// Set when a bundle opened from Finder matches a plugin in the list —
-    /// ContentView switches to My Plugins and selects it, then clears this.
+    /// Set to select a plugin in My Plugins (e.g. from a bundle's preview
+    /// window). ContentView switches tabs, selects it, then clears this.
     @Published var pluginToReveal: AudioPlugin?
-    /// Bundles opened from outside the plug-in folders, waiting on the user to
-    /// confirm installing them. ContentView shows one prompt at a time.
-    @Published var installOffers: [PluginInstallOffer] = []
-    @Published var openBundleError: String?
 
     private var hasCompletedScan = false
     private var pendingOpenedBundles: [URL] = []
 
     /// A `.component`, `.vst` or `.vst3` opened from Finder (double-click,
-    /// Open With, or dropped on the Dock icon). One already in the plug-in
-    /// folders is shown in My Plugins; one from anywhere else (Downloads, a
-    /// mounted installer DMG) is offered for install into the user folder.
+    /// Open With, or dropped on the Dock icon). Opens a window that loads the
+    /// plugin (its own UI, for Audio Units) and offers to install it — or, if
+    /// it's already installed, says so and links to it in My Plugins.
     func openBundle(at url: URL) {
         guard PluginType(bundleExtension: url.pathExtension) != nil else { return }
-        // Matching needs a finished scan — at launch the open arrives before the
-        // first one even starts. Queue it and handle it once the list is in.
+        // Knowing whether it's installed needs a finished scan — at launch the
+        // open arrives before the first one even starts. Queue it until then.
         guard hasCompletedScan, !isScanning else {
             pendingOpenedBundles.append(url)
             return
@@ -734,22 +730,7 @@ class PluginManager: ObservableObject {
 
     private func handleOpenedBundle(_ url: URL) {
         guard let type = PluginType(bundleExtension: url.pathExtension) else { return }
-        if let plugin = installedPlugin(atBundle: url) {
-            pluginToReveal = plugin
-            return
-        }
-        if isSafePluginPath(url) {
-            // Already in a plug-in folder, but the scan didn't list it — usually
-            // an AU macOS hasn't registered (or refused to load).
-            openBundleError = "\(url.lastPathComponent) is already in \(url.deletingLastPathComponent().path), but it didn't show up in the plugin scan. If it's an Audio Unit, macOS may not have registered it yet — try Refresh in a moment."
-            return
-        }
-        let destination = restoreDestination(for: type).appendingPathComponent(url.lastPathComponent)
-        let offer = PluginInstallOffer(source: url, type: type, destination: destination,
-                                       replacesExisting: FileManager.default.fileExists(atPath: destination.path))
-        if !installOffers.contains(where: { $0.source == offer.source }) {
-            installOffers.append(offer)
-        }
+        PluginBundleWindowController.present(url: url, type: type, manager: self)
     }
 
     /// The listed plugin whose bundle is the file at `url`, if any. Compared on
@@ -759,36 +740,29 @@ class PluginManager: ObservableObject {
         return plugins.first { $0.fileURL.resolvingSymlinksInPath().standardizedFileURL.path == path }
     }
 
-    func dismissInstallOffer(_ offer: PluginInstallOffer) {
-        installOffers.removeAll { $0.id == offer.id }
+    /// Where installing the bundle at `url` would put it: the user plug-ins
+    /// folder for its format.
+    func installOffer(for url: URL, type: PluginType) -> PluginInstallOffer {
+        let destination = restoreDestination(for: type).appendingPathComponent(url.lastPathComponent)
+        return PluginInstallOffer(source: url, type: type, destination: destination,
+                                  replacesExisting: FileManager.default.fileExists(atPath: destination.path))
     }
 
     /// Copies the bundle into the user plug-ins folder for its format (never
-    /// moves it — the original might be on a read-only DMG), rescans, and
-    /// selects it. A same-named bundle already there goes to the Trash first,
-    /// so replacing is recoverable.
-    func install(_ offer: PluginInstallOffer) {
-        dismissInstallOffer(offer)
-        Task {
-            let fm = FileManager.default
-            do {
-                try fm.createDirectory(at: offer.destination.deletingLastPathComponent(),
-                                       withIntermediateDirectories: true)
-                if fm.fileExists(atPath: offer.destination.path) {
-                    try fm.trashItem(at: offer.destination, resultingItemURL: nil)
-                }
-                try fm.copyItem(at: offer.source, to: offer.destination)
-            } catch {
-                openBundleError = "Couldn't install \(offer.source.lastPathComponent): \(error.localizedDescription)"
-                return
-            }
-            await scan()
-            if let plugin = installedPlugin(atBundle: offer.destination) {
-                pluginToReveal = plugin
-            } else {
-                openBundleError = "Installed \(offer.source.lastPathComponent) to \(offer.destination.deletingLastPathComponent().path), but it didn't show up in the scan yet. Audio Units can take a moment for macOS to register — try Refresh shortly."
-            }
+    /// moves it — the original might be on a read-only DMG) and rescans. A
+    /// same-named bundle already there goes to the Trash first, so replacing
+    /// is recoverable. Returns the installed plugin, or nil if the scan didn't
+    /// pick it up yet (a fresh AU can take macOS a moment to register).
+    func install(_ offer: PluginInstallOffer) async throws -> AudioPlugin? {
+        let fm = FileManager.default
+        try fm.createDirectory(at: offer.destination.deletingLastPathComponent(),
+                               withIntermediateDirectories: true)
+        if fm.fileExists(atPath: offer.destination.path) {
+            try fm.trashItem(at: offer.destination, resultingItemURL: nil)
         }
+        try fm.copyItem(at: offer.source, to: offer.destination)
+        await scan()
+        return installedPlugin(atBundle: offer.destination)
     }
 
     // MARK: - Delete (Uninstall)
