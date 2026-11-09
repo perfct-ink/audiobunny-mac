@@ -14,8 +14,17 @@ VST2PROBER_DEBUG   = $$(swift build -c debug --arch arm64 --arch x86_64 --produc
 VST2PROBER_RELEASE = $$(swift build -c release --arch arm64 --arch x86_64 --product VST2Prober --show-bin-path)/VST2Prober
 
 .PHONY: all dev build clean open close install uninstall reinstall \
-        test test-stress help
+        test test-stress package publish help
 .DEFAULT_GOAL := all
+
+# Release packaging. The version comes from Info.plist; the zip keeps a fixed
+# name so audio-bunny.com can link to releases/latest/download/AudioBunny.zip.
+VERSION        = $$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)
+RELEASE_ZIP    := .build/release/$(APP_NAME).zip
+RELEASE_REPO   := perfct-ink/audiobunny-mac
+# Ad-hoc signed until a Developer ID certificate is set up; pass
+# SIGN_IDENTITY="Developer ID Application: …" to sign for distribution.
+SIGN_IDENTITY  ?= -
 
 # ── Default ───────────────────────────────────────────────────────────────────
 
@@ -52,6 +61,21 @@ build:
 	@cp Info.plist $(RELEASE_BUNDLE)/Contents/Info.plist
 	@cp AppIcon.icns $(RELEASE_BUNDLE)/Contents/Resources/AppIcon.icns
 	@cp -R .build/release/$(APP_NAME)_$(APP_NAME).bundle $(RELEASE_BUNDLE)/Contents/Resources/
+
+package: build
+	@echo "▸ Signing ($(SIGN_IDENTITY))…"
+	# No --entitlements: AudioBunny.entitlements includes Sign in with Apple,
+	# which needs a provisioning profile, and macOS refuses to launch an
+	# ad-hoc signed app that claims it (same as make build/install today).
+	codesign --force --deep --sign "$(SIGN_IDENTITY)" $(RELEASE_BUNDLE)
+	codesign --verify --deep --strict $(RELEASE_BUNDLE)
+	ditto -c -k --sequesterRsrc --keepParent $(RELEASE_BUNDLE) $(RELEASE_ZIP)
+	@echo "▸ Packaged $(RELEASE_ZIP) (v$(VERSION))"
+
+# Tags v<version> on the current commit and uploads the zip as a GitHub release.
+publish: package
+	gh release create "v$(VERSION)" $(RELEASE_ZIP) --repo $(RELEASE_REPO) \
+		--target $$(git rev-parse HEAD) --title "AudioBunny $(VERSION)" --generate-notes
 
 open:
 	@killall "$(APP_NAME)" 2>/dev/null || true
@@ -106,6 +130,8 @@ help:
 	@echo ""
 	@echo "  Production"
 	@echo "    make build        Build release bundle"
+	@echo "    make package      Build release, sign, zip to .build/release/AudioBunny.zip"
+	@echo "    make publish      package + GitHub release v<Info.plist version>"
 	@echo "    make open         Open existing release bundle"
 	@echo "    make close        Kill the running app"
 	@echo ""

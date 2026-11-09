@@ -50,3 +50,11 @@ swift build -c release
 - Moving plugins requires file-system permissions. If sandboxed, grant access when prompted.
 - Disabling a plugin moves the `.component`/`.vst`/`.vst3` bundle; the system plugin cache may need a restart to fully reflect the change.
 - The app does **not** sandbox itself by default so it can freely access plugin folders.
+
+## Releasing
+
+1. Bump `CFBundleShortVersionString` (and `CFBundleVersion`) in `Info.plist`, commit and push.
+2. Run `make publish`. It builds the release bundle, signs it, zips it to `.build/release/AudioBunny.zip`, and creates GitHub release `v<version>` with that zip attached.
+3. audio-bunny.com links to `https://github.com/perfct-ink/audiobunny-mac/releases/latest/download/AudioBunny.zip`, so the site picks up the new build with no change.
+
+Builds are ad-hoc signed and not notarized (there's no Developer ID certificate yet), so Gatekeeper blocks the first launch: right-click the app and choose Open, or allow it in System Settings → Privacy & Security. Once a Developer ID certificate exists, pass `SIGN_IDENTITY="Developer ID Application: …"` and add notarization. The build is Apple silicon only.
